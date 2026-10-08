@@ -1,14 +1,18 @@
 import 'dotenv/config';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { defaultScheduleRows } from '../src/content/default-schedule.js';
-import { PrismaClient } from '../src/generated/prisma/client.js';
+import { defaultScheduleRows } from '../content/default-schedule.js';
+import { PrismaClient } from '../generated/prisma/client.js';
 
 /*
  * Cria a grade de horários de EXEMPLO (src/content/default-schedule.ts) se a tabela estiver
- * vazia. Rodar de novo (ex.: a cada deploy) não duplica nem sobrescreve o que a clínica já
- * ajustou.
+ * vazia. Rodar de novo não duplica nem sobrescreve o que a clínica já ajustou.
  *
- * Rodar: npm run db:seed
+ * Fica em src/ (e não em prisma/) para ser compilado junto: a imagem Docker de produção não
+ * leva o tsx. Nunca roda sozinho no deploy, para a grade de EXEMPLO não entrar em produção
+ * sem querer.
+ *
+ * Rodar: npm run db:seed                                   (desenvolvimento)
+ *        docker compose run --rm app node dist/scripts/seed.js  (container)
  */
 async function main(): Promise<void> {
   const url = process.env.DATABASE_URL;

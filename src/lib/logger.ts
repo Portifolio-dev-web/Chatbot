@@ -44,6 +44,19 @@ const REDACT_PATHS = [
   '*.body',
 ];
 
+/**
+ * pino-pretty é dependência só de desenvolvimento: não existe na imagem Docker. Se o
+ * container rodar com NODE_ENV=development, o log sai em JSON em vez de derrubar o servidor.
+ */
+function prettyAvailable(): boolean {
+  try {
+    import.meta.resolve('pino-pretty');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** `destination` serve aos testes, que capturam as linhas para conferir que não há dado pessoal. */
 export function createLogger(
   cfg: Pick<AppConfig, 'env' | 'logLevel'>,
@@ -56,7 +69,7 @@ export function createLogger(
     redact: { paths: REDACT_PATHS, censor: '[removido]' },
     // Desenvolvimento: log colorido e legível. Produção: JSON, uma linha por evento, que os
     // painéis das plataformas sabem filtrar. (pino-pretty é dependência só de desenvolvimento.)
-    ...(cfg.env === 'development' && !destination
+    ...(cfg.env === 'development' && !destination && prettyAvailable()
       ? {
           transport: {
             target: 'pino-pretty',

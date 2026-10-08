@@ -1,0 +1,22 @@
+# Nada disto entra no build da imagem.
+# SEGURANÇA: segredos e histórico. Um "COPY . ." por engano não leva o .env nem o .git.
+.env
+.env.*
+.git
+.gitattributes
+.gitignore
+
+# Gerados localmente (a imagem gera os seus).
+node_modules
+dist
+src/generated
+coverage
+*.log
+
+# Não fazem parte da aplicação.
+tests
+.vscode
+.claude
+docker-compose*.yml
+Dockerfile
+.dockerignore

@@ -1,0 +1,66 @@
+# Chatbot + PostgreSQL.
+#
+#   1. cp .env.example .env   e preencha (inclusive POSTGRES_PASSWORD)
+#   2. docker compose up -d --build
+#   3. docker compose run --rm app node dist/scripts/seed.js   (grade de horários de exemplo)
+#
+# O app aplica as migrações sozinho ao subir.
+name: chatbot-fisio
+
+services:
+  db:
+    image: postgres:18.6-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chatbot
+      POSTGRES_DB: chatbot
+      # Obrigatória: sem ela o compose nem sobe (em vez de criar um banco sem senha).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}
+    volumes:
+      # PostgreSQL 18: o volume é montado em /var/lib/postgresql (não mais em .../data).
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U chatbot -d chatbot']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # SEGURANÇA: sem "ports". O banco só é acessível pela rede interna do compose. (O Docker
+    # passa por cima do firewall, como o ufw, nas portas publicadas: publicar seria expor o
+    # banco à internet num servidor.)
+
+  app:
+    build: .
+    image: chatbot-fisio:latest
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      # Sem .env o compose sobe mesmo assim, e o app recusa iniciar listando o que falta.
+      - path: .env
+        required: false
+    environment:
+      # Dentro do compose o banco é o serviço "db", na rede privada do Docker e sem TLS
+      # (por isso a dispensa explícita). Estes valores substituem os do .env.
+      DATABASE_URL: postgresql://chatbot:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env}@db:5432/chatbot
+      DATABASE_TLS_DISABLED: 'true'
+      PORT: '3000'
+    ports:
+      # Só nesta máquina. Para a Meta alcançar: ngrok (testes) ou proxy com HTTPS (produção).
+      - '127.0.0.1:3000:3000'
+    # Endurecimento: código só leitura (escrita só em /tmp, em memória), nenhuma permissão
+    # extra de sistema, e nenhum processo pode ganhar privilégios depois de iniciar.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # O servidor leva até 10 s para terminar o que está fazendo; o Docker espera 15 s antes
+    # de forçar.
+    stop_grace_period: 15s
+
+volumes:
+  db-data:

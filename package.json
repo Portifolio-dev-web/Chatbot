@@ -45,5 +45,9 @@
   "overrides": {
     "deepmerge-ts": "8.0.2",
     "mysql2": "3.24.5"
+  },
+  "allowScripts": {
+    "@prisma/engines": true,
+    "prisma": true
   }
 }

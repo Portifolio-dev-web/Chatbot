@@ -1,0 +1,4 @@
+# Fim de linha LF em tudo, mesmo para quem usa core.autocrlf=true no Windows: os arquivos vão
+# para containers Linux, e o Prisma confere o checksum das migrações (um CRLF mudaria o
+# arquivo e a migração pareceria alterada).
+* text=auto eol=lf
