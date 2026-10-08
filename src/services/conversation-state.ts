@@ -1,0 +1,80 @@
+import { z } from 'zod';
+import { BOOKING_RULES } from '../config/business-rules.js';
+import type { Prisma } from '../generated/prisma/client.js';
+import type { Db } from './audit.js';
+
+/*
+ * Estado do funil (Saudação -> Serviço -> Data -> Horário -> Nome -> Confirmação) de cada
+ * cliente, no banco (tabela conversations), para sobreviver a reinícios e deploys.
+ *
+ * Guarda a ETAPA e as OPÇÕES da última pergunta (id + título de cada botão/item). Assim quem
+ * digita "2" ou "8h" em vez de tocar no botão também é entendido.
+ * PRIVACIDADE: nunca guarda texto livre do cliente; só ids e títulos que o próprio bot gerou.
+ *
+ * Só existe para quem já é cliente (consentiu). Antes disso, as respostas não dependem de
+ * estado: o id de cada botão já diz o que fazer.
+ */
+
+export const STEPS = [
+  'menu',
+  'choosing_service',
+  'choosing_day',
+  'choosing_slot',
+  'awaiting_name',
+  'confirming',
+  'my_appointments',
+  'confirming_cancel',
+  'privacy',
+  'confirming_delete',
+  'info',
+] as const;
+
+export type Step = (typeof STEPS)[number];
+
+const optionSchema = z.object({ id: z.string().max(200), title: z.string().max(30) });
+export type Option = z.infer<typeof optionSchema>;
+
+const contextSchema = z.object({
+  options: z.array(optionSchema).max(10).default([]),
+  /** Só na etapa awaiting_name: o horário escolhido, à espera do nome para confirmar. */
+  serviceType: z.enum(['PHYSIOTHERAPY', 'PERSONAL_TRAINING']).optional(),
+  startsAt: z.iso.datetime().optional(),
+});
+
+export interface ConversationState extends z.infer<typeof contextSchema> {
+  step: Step;
+}
+
+export async function loadState(db: Db, clientId: string, now: Date): Promise<ConversationState | null> {
+  const row = await db.conversation.findUnique({ where: { clientId } });
+  if (!row || row.expiresAt <= now) return null;
+  const step = STEPS.find((s) => s === row.step);
+  const context = contextSchema.safeParse(row.context);
+  // Estado corrompido ou de uma versão antiga do bot: recomeça do menu em vez de travar.
+  if (!step || !context.success) return null;
+  return { step, ...context.data };
+}
+
+export async function saveState(
+  db: Db,
+  clientId: string,
+  state: ConversationState,
+  now: Date,
+): Promise<void> {
+  const context: Prisma.InputJsonObject = {
+    options: state.options,
+    ...(state.serviceType ? { serviceType: state.serviceType } : {}),
+    ...(state.startsAt ? { startsAt: state.startsAt } : {}),
+  };
+  const data = {
+    step: state.step,
+    context,
+    lastInboundAt: now,
+    expiresAt: new Date(now.getTime() + BOOKING_RULES.conversationTtlMs),
+  };
+  await db.conversation.upsert({ where: { clientId }, create: { clientId, ...data }, update: data });
+}
+
+export async function clearState(db: Db, clientId: string): Promise<void> {
+  await db.conversation.deleteMany({ where: { clientId } });
+}

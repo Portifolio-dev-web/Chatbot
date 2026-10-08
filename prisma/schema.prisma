@@ -1,0 +1,256 @@
+// Banco do chatbot da clínica. Convenções:
+// - Tabelas e colunas em snake_case no banco (@@map/@map); camelCase no código.
+// - Datas sempre com fuso (timestamptz), gravadas em UTC; o fuso da clínica (CLINIC_TIMEZONE)
+//   só entra na hora de mostrar e de montar a grade de horários.
+// - [CRIPTOGRAFADO] = cifrado na aplicação (AES-256-GCM, src/lib/crypto.ts) antes de chegar aqui.
+//   O banco nunca vê nome nem telefone em claro (LGPD art. 46; quem marca fisioterapia revela
+//   dado de saúde, art. 11).
+// - Regras que o Prisma não expressa (CHECK, triggers) estão no SQL da migração inicial.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+  // Índice único parcial ("um horário, um atendimento", ver Appointment). Recurso em prévia
+  // do Prisma; o SQL gerado é um índice comum do PostgreSQL.
+  previewFeatures     = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ServiceType {
+  PHYSIOTHERAPY
+  PERSONAL_TRAINING
+
+  @@map("service_type")
+}
+
+enum AppointmentStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+
+  @@map("appointment_status")
+}
+
+/// Quem fez a ação: o próprio cliente (pelo bot), a equipe da clínica ou o sistema (rotinas).
+enum Actor {
+  CLIENT
+  STAFF
+  SYSTEM
+
+  @@map("actor")
+}
+
+enum OutboundKind {
+  /// Lembrete ao cliente antes da consulta/treino.
+  CLIENT_REMINDER
+  /// Aviso à recepção: novo agendamento.
+  RECEPTION_NEW_BOOKING
+  /// Aviso à recepção: agendamento cancelado.
+  RECEPTION_CANCELLATION
+
+  @@map("outbound_kind")
+}
+
+enum OutboundStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELLED
+
+  @@map("outbound_status")
+}
+
+/// Cliente que conversou com o bot.
+model Client {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  /// Índice cego do telefone: HMAC-SHA256 com BLIND_INDEX_KEY. Acha o cliente pelo número que
+  /// chega no webhook sem guardar o número em claro. Nulo depois da anonimização.
+  phoneHash         String?   @unique @map("phone_hash") @db.Char(64)
+  /// [CRIPTOGRAFADO] Telefone (wa_id), necessário para enviar lembretes.
+  phoneEncrypted    String?   @map("phone_encrypted")
+  /// [CRIPTOGRAFADO] Nome informado pelo cliente.
+  nameEncrypted     String?   @map("name_encrypted")
+  /// Base da rotina de retenção: cliente sem interação nem agendamento futuro por muito tempo
+  /// é anonimizado (LGPD art. 15).
+  lastInteractionAt DateTime  @default(now()) @map("last_interaction_at") @db.Timestamptz(3)
+  /// Preenchido quando os dados de identificação foram apagados (pedido do titular ou retenção).
+  anonymizedAt      DateTime? @map("anonymized_at") @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  appointments Appointment[]
+  consents     Consent[]
+  conversation Conversation?
+
+  @@map("clients")
+}
+
+/// Consulta de fisioterapia ou sessão de treino.
+model Appointment {
+  id          String            @id @default(uuid(7)) @db.Uuid
+  clientId    String            @map("client_id") @db.Uuid
+  /// Restrict: o histórico de agendamentos sobrevive à anonimização do cliente.
+  client      Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  serviceType ServiceType       @map("service_type")
+  startsAt    DateTime          @map("starts_at") @db.Timestamptz(3)
+  endsAt      DateTime          @map("ends_at") @db.Timestamptz(3)
+  status      AppointmentStatus @default(CONFIRMED)
+  cancelledAt DateTime?         @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy Actor?            @map("cancelled_by")
+  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  outboundMessages OutboundMessage[]
+
+  /// Um horário, um atendimento, garantido PELO BANCO: se duas pessoas confirmarem o mesmo
+  /// horário no mesmo instante, a segunda recebe erro em vez de gerar encaixe duplo.
+  /// Agendamento cancelado não ocupa a vaga (outra pessoa pode marcar).
+  @@unique([serviceType, startsAt], map: "appointments_slot_taken", where: { status: { not: "CANCELLED" } })
+  @@index([startsAt])
+  @@index([clientId, startsAt])
+  @@map("appointments")
+}
+
+/// Grade semanal de atendimento. Horários livres = grade - bloqueios - agendamentos.
+/// Horas em minutos desde 00:00 no fuso da clínica: 480 = 08:00, 1080 = 18:00.
+model AvailabilityRule {
+  id          Int         @id @default(autoincrement())
+  serviceType ServiceType @map("service_type")
+  /// 0 = domingo ... 6 = sábado.
+  weekday     Int         @db.SmallInt
+  startMinute Int         @map("start_minute") @db.SmallInt
+  endMinute   Int         @map("end_minute") @db.SmallInt
+  /// Duração de cada atendimento. Os horários oferecidos começam em startMinute, em passos
+  /// deste tamanho, sem passar de endMinute.
+  slotMinutes Int         @map("slot_minutes") @db.SmallInt
+  active      Boolean     @default(true)
+
+  @@index([serviceType, weekday])
+  @@map("availability_rules")
+}
+
+/// Período sem atendimento: feriado, férias, evento. serviceType nulo = vale para todos.
+model ScheduleBlock {
+  id          Int          @id @default(autoincrement())
+  serviceType ServiceType? @map("service_type")
+  startsAt    DateTime     @map("starts_at") @db.Timestamptz(3)
+  endsAt      DateTime     @map("ends_at") @db.Timestamptz(3)
+  /// Motivo interno ("Feriado"). Nunca dado de cliente.
+  reason      String?      @db.VarChar(120)
+
+  @@index([startsAt, endsAt])
+  @@map("schedule_blocks")
+}
+
+/// Estado do funil de cada cliente (Passo 4). Fica no banco, não na memória, para que um
+/// deploy ou reinício não derrube quem estava no meio de um agendamento.
+model Conversation {
+  clientId      String   @id @map("client_id") @db.Uuid
+  client        Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  /// Etapa atual do funil (validada na aplicação).
+  step          String   @db.VarChar(40)
+  /// Escolhas parciais (serviço, horários oferecidos). NUNCA texto livre do cliente.
+  context       Json     @default("{}")
+  /// Última mensagem recebida. A Meta só permite resposta livre até 24 h depois dela; fora
+  /// dessa janela, só template aprovado.
+  lastInboundAt DateTime @map("last_inbound_at") @db.Timestamptz(3)
+  /// Depois disso o estado é esquecido e a conversa recomeça do menu.
+  expiresAt     DateTime @map("expires_at") @db.Timestamptz(3)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([expiresAt])
+  @@map("conversations")
+}
+
+/// Mensagens já processadas. A Meta reenvia o webhook se não receber resposta a tempo; sem
+/// isso, o cliente receberia a mesma resposta duas vezes (ou marcaria dois horários).
+/// Só o ID da Meta, sem conteúdo; a rotina de limpeza apaga após alguns dias.
+model ProcessedMessage {
+  waMessageId String   @id @map("wa_message_id") @db.VarChar(255)
+  receivedAt  DateTime @default(now()) @map("received_at") @db.Timestamptz(3)
+
+  @@index([receivedAt])
+  @@map("processed_messages")
+}
+
+/// Fila de mensagens ativas (templates aprovados pela Meta): lembretes ao cliente e avisos à
+/// recepção. O destinatário NÃO fica gravado aqui: sai do cadastro (cliente) ou da
+/// configuração (recepção) na hora do envio, para não espalhar cópias do telefone.
+model OutboundMessage {
+  id            String         @id @default(uuid(7)) @db.Uuid
+  kind          OutboundKind
+  appointmentId String         @map("appointment_id") @db.Uuid
+  appointment   Appointment    @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  /// Não enviar antes deste momento (ex.: lembrete 24 h antes do horário).
+  sendAfter     DateTime       @map("send_after") @db.Timestamptz(3)
+  status        OutboundStatus @default(PENDING)
+  attempts      Int            @default(0)
+  /// Código de erro da Meta (ex.: 131047), nunca a mensagem de erro, que pode ecoar dados.
+  lastErrorCode String?        @map("last_error_code") @db.VarChar(40)
+  /// ID devolvido pela Meta, para casar com os avisos de entrega e leitura.
+  waMessageId   String?        @unique @map("wa_message_id") @db.VarChar(255)
+  sentAt        DateTime?      @map("sent_at") @db.Timestamptz(3)
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  /// Nunca dois lembretes (ou dois avisos iguais) para o mesmo agendamento.
+  @@unique([appointmentId, kind])
+  @@index([status, sendAfter])
+  @@map("outbound_messages")
+}
+
+/// Texto exato de cada versão do aviso de privacidade/consentimento enviado pelo bot.
+/// Imutável (trigger no banco): mudar o texto = criar nova versão. Assim cada consentimento
+/// aponta para o texto que a pessoa de fato leu (LGPD art. 8º, §2º: a prova cabe à clínica).
+model ConsentText {
+  /// Ex.: "2026-10-08".
+  version     String   @id @db.VarChar(40)
+  body        String
+  publishedAt DateTime @default(now()) @map("published_at") @db.Timestamptz(3)
+
+  consents Consent[]
+
+  @@map("consent_texts")
+}
+
+/// Consentimento do cliente para o tratamento dos dados (LGPD art. 11, I: específico e
+/// destacado, por envolver dado de saúde). Revogar é tão fácil quanto consentir (art. 8º, §5º).
+model Consent {
+  id                String      @id @default(uuid(7)) @db.Uuid
+  clientId          String      @map("client_id") @db.Uuid
+  /// Restrict: a prova do consentimento sobrevive à anonimização do cliente.
+  client            Client      @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  textVersion       String      @map("text_version") @db.VarChar(40)
+  text              ConsentText @relation(fields: [textVersion], references: [version], onDelete: Restrict)
+  givenAt           DateTime    @default(now()) @map("given_at") @db.Timestamptz(3)
+  /// ID da mensagem do WhatsApp em que o cliente respondeu "concordo" (evidência).
+  evidenceMessageId String?     @map("evidence_message_id") @db.VarChar(255)
+  revokedAt         DateTime?   @map("revoked_at") @db.Timestamptz(3)
+
+  @@index([clientId, givenAt])
+  @@map("consents")
+}
+
+/// Trilha de auditoria: SÓ INCLUSÃO (trigger no banco recusa UPDATE, DELETE e TRUNCATE).
+/// Sem chave estrangeira, para sobreviver à anonimização. `detail` NUNCA leva dado pessoal
+/// (esta tabela não é criptografada): identifique sempre por ID.
+model AuditEvent {
+  id         BigInt   @id @default(autoincrement())
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(3)
+  actor      Actor
+  /// Ex.: "consent.given", "appointment.created", "client.anonymized".
+  action     String   @db.VarChar(60)
+  entityType String   @map("entity_type") @db.VarChar(40)
+  entityId   String   @map("entity_id") @db.VarChar(64)
+  detail     Json?
+
+  @@index([entityType, entityId])
+  @@index([occurredAt])
+  @@map("audit_events")
+}

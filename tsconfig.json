@@ -1,0 +1,28 @@
+{
+  // TypeScript 7: "types" precisa ser explícito (o padrão passou a ser nenhum @types).
+  "compilerOptions": {
+    // Node 22+ entende ES2023 nativamente: nada de transpilar para JS antigo.
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+
+    "rootDir": "src",
+    "outDir": "dist",
+    // Mapas de código só no servidor (nunca vão a um navegador): a pilha de erro aponta o .ts.
+    "sourceMap": true,
+
+    // Rigor máximo: erros de tipo pegos na compilação, não no atendimento ao cliente.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,15 @@
+# Dependências e build
+node_modules/
+dist/
+coverage/
+
+# Prisma Client gerado (recriado por `npm run prisma:generate`)
+src/generated/
+
+# SEGURANÇA: segredos nunca vão para o git. Só o modelo comentado é versionado.
+.env
+.env.*
+!.env.example
+
+# Logs locais podem conter dados de clientes: não versionar.
+*.log

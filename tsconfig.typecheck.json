@@ -1,0 +1,10 @@
+{
+  // Checagem de tipos de TUDO (código, testes, seed e configs). O tsconfig.json continua só
+  // com src/, porque é ele que gera o dist/ que vai para produção.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["src", "tests", "prisma", "prisma.config.ts", "vitest.config.ts"]
+}
