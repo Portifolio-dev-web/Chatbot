@@ -2,7 +2,8 @@ import { normalize } from '../../lib/text.js';
 import type { Profile } from '../../profiles/index.js';
 import type { ConversationState, Option } from '../conversation-state.js';
 import type { MessageContent } from '../webhook-parser.js';
-import { decodeReplyId } from './reply-ids.js';
+import { isCrisisMessage } from './crisis.js';
+import { decodeReplyId, type WhoAnswer } from './reply-ids.js';
 import { menuOptions } from './texts.js';
 
 /*
@@ -46,6 +47,10 @@ export type Intent =
   | { kind: 'reminder_confirm'; appointmentId: string }
   | { kind: 'reminder_change'; appointmentId: string }
   | { kind: 'reschedule'; appointmentId: string }
+  | { kind: 'who'; service: string; audience: WhoAnswer }
+  /** Mensagem com palavras de risco (ver crisis.ts). Tem prioridade sobre tudo. */
+  | { kind: 'crisis' }
+  /** Resposta a "qual o nome?" (do cliente ou, para menor, do paciente: o estado diz qual). */
   | { kind: 'name'; name: string }
   | { kind: 'invalid_name' }
   | { kind: 'thanks' }
@@ -112,10 +117,14 @@ function hasAny(tokens: Set<string>, list: ReadonlySet<string> | readonly string
 }
 
 function interpretText(text: string, state: ConversationState | null, profile: Profile): Intent {
+  // Antes de tudo, inclusive de "esperando o nome": quem escreve que quer morrer recebe os
+  // contatos de emergência, não um "nome inválido".
+  if (isCrisisMessage(text)) return { kind: 'crisis' };
+
   const t = normalize(text);
   const tokens = new Set(t.split(' ').filter(Boolean));
 
-  if (state?.step === 'awaiting_name') {
+  if (state?.step === 'awaiting_name' || state?.step === 'awaiting_patient_name') {
     if (tokens.size <= 2 && hasAny(tokens, EXIT)) return { kind: 'menu', greeting: false };
     const name = parseName(text);
     return name ? { kind: 'name', name } : { kind: 'invalid_name' };

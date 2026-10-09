@@ -208,6 +208,7 @@ describe.skipIf(!url)('banco de dados (integração)', () => {
           timeZone: 'America/Sao_Paulo',
           privacyPolicyUrl: 'https://exemplo.com/privacidade',
           profile: PROFILES['fisio-personal'],
+          alertPhone: undefined,
         }),
       }),
     });

@@ -18,7 +18,10 @@ export interface RuleInput {
   weekday: number;
   startMinute: number;
   endMinute: number;
+  /** Intervalo entre o início de um horário e o do seguinte. */
   slotMinutes: number;
+  /** Duração do atendimento, se menor que o intervalo (sessão de 50 min de hora em hora). */
+  sessionMinutes?: number | null;
 }
 
 function overlaps(a: Interval, b: Interval): boolean {
@@ -41,10 +44,11 @@ export function computeFreeSlots(input: {
     const weekday = weekdayOf(day);
     for (const rule of rules) {
       if (rule.weekday !== weekday) continue;
-      for (let m = rule.startMinute; m + rule.slotMinutes <= rule.endMinute; m += rule.slotMinutes) {
+      const duration = rule.sessionMinutes ?? rule.slotMinutes;
+      for (let m = rule.startMinute; m + duration <= rule.endMinute; m += rule.slotMinutes) {
         const startsAt = zonedToUtc(day, m, timeZone);
         if (startsAt < from || startsAt > to) continue;
-        const slot = { startsAt, endsAt: new Date(startsAt.getTime() + rule.slotMinutes * 60_000) };
+        const slot = { startsAt, endsAt: new Date(startsAt.getTime() + duration * 60_000) };
         if (busy.some((b) => overlaps(slot, b))) continue;
         slots.set(startsAt.getTime(), slot);
       }

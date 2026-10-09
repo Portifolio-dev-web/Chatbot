@@ -20,6 +20,7 @@ export function scheduleRows(templates: readonly ScheduleTemplate[]): Array<{
   startMinute: number;
   endMinute: number;
   slotMinutes: number;
+  sessionMinutes: number | null;
 }> {
   return templates.flatMap((template) =>
     template.weekdays.flatMap((weekday) =>
@@ -29,6 +30,7 @@ export function scheduleRows(templates: readonly ScheduleTemplate[]): Array<{
         startMinute: minutes(start),
         endMinute: minutes(end),
         slotMinutes: template.slotMinutes,
+        sessionMinutes: template.sessionMinutes ?? null,
       })),
     ),
   );

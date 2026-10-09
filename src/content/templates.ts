@@ -24,4 +24,12 @@ export const TEMPLATES = {
    * {{1}} "novo agendamento" | "cancelamento" | "cancelamento com menos de 24 h"
    */
   receptionNotice: 'aviso_agenda_recepcao',
+  /**
+   * alerta_risco (perfis com alerta de crise, ex.: psicologia; vai para RECEPTION_WHATSAPP)
+   * Corpo: "Alerta automático do WhatsApp: uma pessoa enviou uma mensagem que pode indicar
+   *         risco. Contato: {{1}}. Recebida em {{2}}. Recomendamos retornar o quanto antes."
+   * {{1}} "+5511987654321", {{2}} "quinta-feira, 09/10 às 14:32"
+   * O texto da mensagem NÃO vai no alerta (minimização): a profissional retorna pelo contato.
+   */
+  crisisAlert: 'alerta_risco',
 } as const;

@@ -61,7 +61,12 @@ export const replyIds = {
   remindOk: (appointmentId: string) => `remind:ok:${appointmentId}`,
   remindChange: (appointmentId: string) => `remind:change:${appointmentId}`,
   reschedule: (appointmentId: string) => `resched:${appointmentId}`,
+  // Perfis com menores: "para quem é a sessão?".
+  who: (s: string, audience: WhoAnswer) => `who:${s}:${audience}`,
 } as const;
+
+export type WhoAnswer = 'self' | 'minor' | 'other';
+const WHO_ANSWERS: readonly WhoAnswer[] = ['self', 'minor', 'other'];
 
 /** Lê um id de botão/item. undefined = id desconhecido ou adulterado. */
 export function decodeReplyId(id: string): Intent | undefined {
@@ -133,6 +138,13 @@ export function decodeReplyId(id: string): Intent | undefined {
       return a && UUID.test(a) && b === undefined
         ? { kind: 'reschedule', appointmentId: a }
         : undefined;
+    case 'who': {
+      const service = parseService(a);
+      const audience = WHO_ANSWERS.find((w) => w === b);
+      return service && audience && c === undefined
+        ? { kind: 'who', service, audience }
+        : undefined;
+    }
     default:
       return undefined;
   }

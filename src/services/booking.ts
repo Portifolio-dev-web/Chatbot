@@ -59,9 +59,21 @@ export function reminderTime(startsAt: Date, timeZone: string): Date {
  */
 export async function bookAppointment(
   prisma: PrismaClient,
-  input: { clientId: string; serviceType: string; startsAt: Date; now: Date; timeZone: string },
+  input: {
+    clientId: string;
+    serviceType: string;
+    startsAt: Date;
+    now: Date;
+    timeZone: string;
+    /** Limite do perfil (psicologia: 1, só a primeira sessão). Padrão: o geral. */
+    maxFutureAppointments?: number;
+    /** Atendimento de menor marcado pelo responsável: nome do(a) paciente JÁ criptografado. */
+    minorPatientNameEncrypted?: string;
+  },
 ): Promise<Appointment> {
   const { clientId, serviceType, startsAt, now, timeZone } = input;
+  const maxFuture = input.maxFutureAppointments ?? BOOKING_RULES.maxFutureAppointments;
+  const minor = input.minorPatientNameEncrypted;
   try {
     return await prisma.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`booking:${serviceType}`}))`;
@@ -73,7 +85,7 @@ export async function bookAppointment(
         where: { clientId, status: 'CONFIRMED', startsAt: { gt: now } },
         select: { startsAt: true, endsAt: true },
       });
-      if (future.length >= BOOKING_RULES.maxFutureAppointments) {
+      if (future.length >= maxFuture) {
         throw new BookingError('too_many_future');
       }
       if (future.some((f) => f.startsAt < slot.endsAt && slot.startsAt < f.endsAt)) {
@@ -81,7 +93,13 @@ export async function bookAppointment(
       }
 
       const appointment = await tx.appointment.create({
-        data: { clientId, serviceType, startsAt: slot.startsAt, endsAt: slot.endsAt },
+        data: {
+          clientId,
+          serviceType,
+          startsAt: slot.startsAt,
+          endsAt: slot.endsAt,
+          ...(minor ? { patientIsMinor: true, patientNameEncrypted: minor } : {}),
+        },
       });
 
       const outbound: Prisma.OutboundMessageCreateManyInput[] = [
@@ -99,7 +117,7 @@ export async function bookAppointment(
         action: 'appointment.created',
         entityType: 'appointment',
         entityId: appointment.id,
-        detail: { serviceType, startsAt: startsAt.toISOString() },
+        detail: { serviceType, startsAt: startsAt.toISOString(), minor: Boolean(minor) },
       });
       return appointment;
     });

@@ -1,15 +1,10 @@
 import { BOOKING_RULES, MESSAGE_RATE_LIMIT } from '../../config/business-rules.js';
-import { currentConsentText } from '../../content/consent.js';
+import { currentConsentText, type Audience } from '../../content/consent.js';
+import { TEMPLATE_LANGUAGE, TEMPLATES } from '../../content/templates.js';
 import type { Client, PrismaClient } from '../../generated/prisma/client.js';
 import { createKeyedMutex, createRateLimiter } from '../../lib/concurrency.js';
-import { phoneIndex } from '../../lib/crypto.js';
+import { getFieldCipher, normalizePhone, phoneIndex } from '../../lib/crypto.js';
 import { getLogger, safeError } from '../../lib/logger.js';
-import {
-  serviceByCode,
-  serviceLabel,
-  type Profile,
-  type ServiceDefinition,
-} from '../../profiles/index.js';
 import {
   addDays,
   dateKey,
@@ -22,6 +17,12 @@ import {
   zonedToUtc,
   type LocalDate,
 } from '../../lib/time.js';
+import {
+  serviceByCode,
+  serviceLabel,
+  type Profile,
+  type ServiceDefinition,
+} from '../../profiles/index.js';
 import { audit } from '../audit.js';
 import { bookingWindow, findFreeSlots, findSlotIfFree, type Interval } from '../availability.js';
 import {
@@ -35,6 +36,7 @@ import {
 import {
   anonymizeClient,
   decryptName,
+  decryptPatientName,
   findClientByPhone,
   hasCurrentConsent,
   recordConsent,
@@ -50,42 +52,67 @@ import {
 } from '../conversation-state.js';
 import type { MessageHandler } from '../inbound-dispatcher.js';
 import type { InboundMessage } from '../webhook-parser.js';
-import type { ListSection, ReplyButton, WhatsAppClient } from '../whatsapp-client.js';
+import {
+  WhatsAppApiError,
+  type ListSection,
+  type ReplyButton,
+  type WhatsAppClient,
+} from '../whatsapp-client.js';
 import { interpret, type FaqTopic, type Intent } from './intents.js';
 import { replyIds } from './reply-ids.js';
-import { BUTTONS, TEXTS, buildMenu, serviceButtons } from './texts.js';
+import { BUTTONS, TEXTS, buildMenu, contactButton, serviceButtons } from './texts.js';
 
 /*
  * O atendimento: recebe uma mensagem, entende a intenção (intents.ts), responde e guarda a
  * etapa do funil (conversation-state.ts).
  *
- * Funil de agendamento: serviço -> consentimento (só na 1ª vez) -> dia -> horário -> nome
- * (só na 1ª vez) -> confirmação. Cada etapa revalida o que importa (consentimento vigente,
- * horário ainda livre, agendamento pertence a quem pede), porque o cliente pode tocar num
- * botão de uma mensagem antiga.
+ * Funil de agendamento: serviço -> [para quem é] -> consentimento (só na 1ª vez) -> dia ->
+ * horário -> nome (só na 1ª vez) -> [nome do paciente menor] -> confirmação. Cada etapa
+ * revalida o que importa (consentimento vigente, horário ainda livre, agendamento pertence a
+ * quem pede), porque o cliente pode tocar num botão de uma mensagem antiga.
  *
- * Os serviços oferecidos vêm do PERFIL da instalação (CLINIC_PROFILE, src/profiles).
+ * Os serviços e as regras do tipo de atendimento (menores, alerta de crise, discrição) vêm do
+ * PERFIL da instalação (CLINIC_PROFILE, src/profiles).
  */
+
+/** Alerta de crise para o mesmo contato: no máximo 1 a cada 30 min (não inunda a profissional). */
+const CRISIS_ALERT_INTERVAL_MS = 30 * 60_000;
 
 export interface ChatbotDeps {
   prisma: PrismaClient;
   whatsapp: WhatsAppClient;
   timeZone: string;
   privacyPolicyUrl: string | undefined;
-  /** Perfil da instalação: serviços, menu e triagem. */
+  /** Perfil da instalação: serviços, menu, triagem e regras do tipo de atendimento. */
   profile: Profile;
+  /** Quem recebe o alerta de crise (RECEPTION_WHATSAPP). Sem ele, só a pessoa é orientada. */
+  alertPhone: string | undefined;
   now?: () => Date;
+}
+
+/** Estado que vive enquanto o processo vive (não vai para o banco). */
+interface Runtime {
+  crisisAlerts: { allow(key: string): boolean };
 }
 
 /** Uma mensagem sendo atendida: quem é, onde parou e como responder. */
 class Turn {
+  /** Para quem é a sessão (perfis com menores). Persiste entre as etapas do funil. */
+  audience: Audience | undefined;
+  /** [CRIPTOGRAFADO] nome do paciente menor, entre a pergunta e a confirmação. */
+  patientNameEncrypted: string | undefined;
+
   constructor(
     readonly deps: ChatbotDeps,
+    readonly runtime: Runtime,
     readonly message: InboundMessage,
     public client: Client | null,
     readonly state: ConversationState | null,
     readonly now: Date,
-  ) {}
+  ) {
+    this.audience = state?.audience;
+    this.patientNameEncrypted = state?.patientNameEncrypted;
+  }
 
   get prisma(): PrismaClient {
     return this.deps.prisma;
@@ -129,12 +156,32 @@ class Turn {
     await this.deps.whatsapp.sendList(this.message.from, body, buttonLabel, sections);
   }
 
-  /** Só quem já é cliente tem estado salvo (antes do consentimento, nada é gravado). */
+  /**
+   * Só quem já é cliente tem estado salvo (antes do consentimento, nada é gravado). O público
+   * e o nome do paciente acompanham todas as etapas até a confirmação.
+   */
   async remember(state: ConversationState): Promise<void> {
-    if (this.client) await saveState(this.prisma, this.client.id, state, this.now);
+    if (!this.client) return;
+    await saveState(
+      this.prisma,
+      this.client.id,
+      {
+        ...state,
+        audience: state.audience ?? this.audience,
+        patientNameEncrypted: state.patientNameEncrypted ?? this.patientNameEncrypted,
+      },
+      this.now,
+    );
+  }
+
+  /** Início de um novo agendamento: esquece o público e o paciente do anterior. */
+  resetFunnel(): void {
+    this.audience = undefined;
+    this.patientNameEncrypted = undefined;
   }
 
   async forget(): Promise<void> {
+    this.resetFunnel();
     if (this.client) await clearState(this.prisma, this.client.id);
   }
 }
@@ -145,6 +192,9 @@ export function createChatbot(deps: ChatbotDeps): MessageHandler {
   const limiter = createRateLimiter(MESSAGE_RATE_LIMIT.max, MESSAGE_RATE_LIMIT.windowMs, () =>
     now().getTime(),
   );
+  const runtime: Runtime = {
+    crisisAlerts: createRateLimiter(1, CRISIS_ALERT_INTERVAL_MS, () => now().getTime()),
+  };
 
   return {
     async handle(message) {
@@ -154,12 +204,17 @@ export function createChatbot(deps: ChatbotDeps): MessageHandler {
         getLogger().warn('limite de mensagens por minuto atingido; mensagem ignorada');
         return;
       }
-      await runExclusive(key, () => handleTurn(deps, message, now()));
+      await runExclusive(key, () => handleTurn(deps, runtime, message, now()));
     },
   };
 }
 
-async function handleTurn(deps: ChatbotDeps, message: InboundMessage, now: Date): Promise<void> {
+async function handleTurn(
+  deps: ChatbotDeps,
+  runtime: Runtime,
+  message: InboundMessage,
+  now: Date,
+): Promise<void> {
   const logger = getLogger();
   // Os tiques azuis são cortesia: se falharem, o atendimento segue.
   await deps.whatsapp.markAsRead(message.id).catch((err: unknown) => {
@@ -174,7 +229,7 @@ async function handleTurn(deps: ChatbotDeps, message: InboundMessage, now: Date)
   // PRIVACIDADE: só a intenção e a etapa; nunca o texto, o nome ou o telefone.
   logger.info({ intent: intent.kind, step: state?.step ?? null, knownClient: client !== null }, 'atendimento');
 
-  const turn = new Turn(deps, message, client, state, now);
+  const turn = new Turn(deps, runtime, message, client, state, now);
   try {
     await respond(turn, intent);
   } catch (err) {
@@ -194,12 +249,14 @@ async function respond(turn: Turn, intent: Intent): Promise<void> {
     return respondForService(turn, intent, service);
   }
   switch (intent.kind) {
+    case 'crisis':
+      return crisis(turn);
     case 'menu':
       return sendMenu(turn, intent.greeting ? TEXTS.welcome(turn.profile) : TEXTS.howCanIHelp);
     case 'unknown':
       return sendMenu(turn, TEXTS.didNotUnderstand);
     case 'unsupported':
-      return sendMenu(turn, TEXTS.unsupported);
+      return sendMenu(turn, TEXTS.unsupported(turn.profile));
     case 'thanks':
       return turn.buttons('info', TEXTS.thanks, [BUTTONS.menu]);
     case 'ask_service':
@@ -207,10 +264,10 @@ async function respond(turn: Turn, intent: Intent): Promise<void> {
     case 'faq':
       return sendFaq(turn, intent.topic);
     case 'reception':
-      return turn.buttons('info', TEXTS.reception(), [BUTTONS.menu]);
+      return turn.buttons('info', TEXTS.reception(turn.profile), [BUTTONS.menu]);
     case 'consent_declined':
       await turn.forget();
-      return turn.buttons('info', TEXTS.consentDeclined(), [BUTTONS.menu]);
+      return turn.buttons('info', TEXTS.consentDeclined(turn.profile), [BUTTONS.menu]);
     case 'consent_typed':
       return consentTyped(turn);
     case 'name':
@@ -247,7 +304,9 @@ async function respondForService(
     case 'suggest':
       return suggestService(turn, service);
     case 'book':
-      return withConsent(turn, service, () => sendDays(turn, service, 0));
+      return startBooking(turn, service);
+    case 'who':
+      return chooseAudience(turn, service, intent.audience);
     case 'consent':
       return acceptConsent(turn, service, intent.version);
     case 'days':
@@ -262,6 +321,45 @@ async function respondForService(
 }
 
 // ---------------------------------------------------------------------------
+// Crise (ver crisis.ts): contatos de emergência sempre; alerta à profissional se o perfil pede
+// ---------------------------------------------------------------------------
+
+async function crisis(turn: Turn): Promise<void> {
+  const logger = getLogger();
+  // 1) Primeiro os contatos de emergência: é o que mais importa e não depende de mais nada.
+  await turn.text(TEXTS.crisisSupport);
+
+  // 2) Alerta (perfil com crisisAlert). Base legal: proteção da vida (LGPD art. 11, II, "e"),
+  //    por isso vale mesmo para quem ainda não consentiu. Vai só o contato e a hora; o texto
+  //    da mensagem não sai daqui.
+  const key = phoneIndex(turn.message.from);
+  let alerted = false;
+  let alertErrorCode: string | undefined;
+  if (turn.profile.crisisAlert && turn.deps.alertPhone && turn.runtime.crisisAlerts.allow(key)) {
+    try {
+      await turn.deps.whatsapp.sendTemplate(turn.deps.alertPhone, {
+        name: TEMPLATES.crisisAlert,
+        language: TEMPLATE_LANGUAGE,
+        bodyParams: [`+${normalizePhone(turn.message.from)}`, formatDateTime(turn.now, turn.tz)],
+      });
+      alerted = true;
+      await turn.text(TEXTS.crisisAlerted(turn.profile));
+    } catch (err) {
+      alertErrorCode = err instanceof WhatsAppApiError ? err.code : 'INVALID';
+      logger.error({ err: safeError(err) }, 'crise: não foi possível alertar a profissional');
+    }
+  }
+  logger.warn({ alerted }, 'mensagem com possível risco: contatos de emergência enviados');
+  await audit(turn.prisma, {
+    actor: 'SYSTEM',
+    action: 'crisis.detected',
+    entityType: turn.client ? 'client' : 'contact',
+    entityId: turn.client?.id ?? key,
+    detail: { alerted, ...(alertErrorCode ? { alertErrorCode } : {}) },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Menu, triagem e dúvidas frequentes
 // ---------------------------------------------------------------------------
 
@@ -272,7 +370,7 @@ function sendMenu(turn: Turn, body: string): Promise<void> {
 /** Com um serviço só no perfil, não há o que perguntar: vai direto para o agendamento. */
 function askService(turn: Turn): Promise<void> {
   const [only, ...others] = turn.profile.services;
-  if (only && others.length === 0) return withConsent(turn, only, () => sendDays(turn, only, 0));
+  if (only && others.length === 0) return startBooking(turn, only);
   return turn.buttons(
     'choosing_service',
     TEXTS.whichService(turn.profile),
@@ -289,7 +387,11 @@ function suggestService(turn: Turn, service: ServiceDefinition): Promise<void> {
 }
 
 async function sendFaq(turn: Turn, topic: FaqTopic): Promise<void> {
-  const body = { prices: TEXTS.prices, location: TEXTS.location, hours: TEXTS.hours }[topic]();
+  const body = {
+    prices: TEXTS.prices,
+    location: () => TEXTS.location(turn.profile),
+    hours: TEXTS.hours,
+  }[topic]();
   const buttons = [BUTTONS.book, BUTTONS.menu];
   // Mensagem com botões aceita até 1024 caracteres; tabela de preços maior vai em texto.
   if ([...body].length <= 1024) return turn.buttons('info', body, buttons);
@@ -298,22 +400,70 @@ async function sendFaq(turn: Turn, topic: FaqTopic): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Consentimento (LGPD art. 11, I)
+// Início do agendamento: para quem é (perfis com menores) e consentimento (LGPD arts. 11 e 14)
 // ---------------------------------------------------------------------------
+
+/** Começo de um agendamento novo. Perfis com menores perguntam antes para quem é. */
+function startBooking(turn: Turn, service: ServiceDefinition): Promise<void> {
+  turn.resetFunnel();
+  if (turn.profile.audience === 'adults_and_minors') return askAudience(turn, service);
+  return withConsent(turn, service, () => sendDays(turn, service, 0));
+}
+
+function askAudience(turn: Turn, service: ServiceDefinition): Promise<void> {
+  turn.resetFunnel();
+  return turn.buttons('choosing_audience', TEXTS.whoIsPatient, [
+    { id: replyIds.who(service.code, 'self'), title: 'Para mim' },
+    { id: replyIds.who(service.code, 'minor'), title: 'Para menor de 18' },
+    { id: replyIds.who(service.code, 'other'), title: 'Para outro adulto' },
+  ]);
+}
+
+async function chooseAudience(
+  turn: Turn,
+  service: ServiceDefinition,
+  answer: 'self' | 'minor' | 'other',
+): Promise<void> {
+  // Botão de "para quem é" num perfil que não atende menores (antigo ou forjado).
+  if (turn.profile.audience !== 'adults_and_minors') return sendMenu(turn, TEXTS.didNotUnderstand);
+  if (answer === 'other') {
+    turn.resetFunnel();
+    return turn.buttons('info', TEXTS.otherAdult(turn.profile), [BUTTONS.menu]);
+  }
+  turn.resetFunnel();
+  turn.audience = answer;
+  return withConsent(turn, service, () => sendDays(turn, service, 0));
+}
+
+/** Consentimentos possíveis neste perfil (o do próprio paciente e, se houver, o do responsável). */
+function consentAudiences(profile: Profile): Audience[] {
+  return profile.audience === 'adults_and_minors' ? ['self', 'minor'] : ['self'];
+}
 
 async function withConsent(
   turn: Turn,
   service: ServiceDefinition,
   next: () => Promise<void>,
 ): Promise<void> {
-  const { version } = currentConsentText(turn.deps.privacyPolicyUrl);
+  // Perfis com menores precisam saber para quem é ANTES do consentimento (os textos são
+  // diferentes). Estado vencido no meio do funil: pergunta de novo.
+  if (turn.profile.audience === 'adults_and_minors' && !turn.audience) {
+    return askAudience(turn, service);
+  }
+  const audience = turn.audience ?? 'self';
+  const { version } = currentConsentText(turn.deps.privacyPolicyUrl, turn.profile, audience);
   if (turn.client && (await hasCurrentConsent(turn.prisma, turn.client.id, version))) return next();
-  return sendConsentPrompt(turn, service);
+  return sendConsentPrompt(turn, service, audience);
 }
 
-function sendConsentPrompt(turn: Turn, service: ServiceDefinition): Promise<void> {
-  const consent = currentConsentText(turn.deps.privacyPolicyUrl);
-  // A versão vai no id do botão: o toque prova QUAL texto a pessoa leu.
+function sendConsentPrompt(
+  turn: Turn,
+  service: ServiceDefinition,
+  audience: Audience,
+): Promise<void> {
+  const consent = currentConsentText(turn.deps.privacyPolicyUrl, turn.profile, audience);
+  // A versão vai no id do botão: o toque prova QUAL texto a pessoa leu (e, por ele, se ela
+  // consentiu como paciente ou como responsável).
   return turn.buttons(
     'choosing_service',
     consent.body,
@@ -330,7 +480,7 @@ async function consentTyped(turn: Turn): Promise<void> {
   const [only, ...others] = turn.profile.services;
   if (only && others.length === 0) {
     await turn.text(TEXTS.consentNeedsButton);
-    return sendConsentPrompt(turn, only);
+    return startBooking(turn, only);
   }
   return turn.buttons(
     'choosing_service',
@@ -344,16 +494,22 @@ async function acceptConsent(
   service: ServiceDefinition,
   version: string,
 ): Promise<void> {
-  const consent = currentConsentText(turn.deps.privacyPolicyUrl);
-  if (version !== consent.version) {
+  const match = consentAudiences(turn.profile)
+    .map((audience) => ({
+      audience,
+      text: currentConsentText(turn.deps.privacyPolicyUrl, turn.profile, audience),
+    }))
+    .find((candidate) => candidate.text.version === version);
+  if (!match) {
     // Tocou no "Concordo" de um aviso antigo: o texto mudou desde então.
     await turn.text(TEXTS.consentUpdated);
-    return sendConsentPrompt(turn, service);
+    return withConsent(turn, service, () => sendDays(turn, service, 0));
   }
+  turn.audience = match.audience;
   turn.client = await recordConsent(turn.prisma, {
     phone: turn.message.from,
-    version: consent.version,
-    body: consent.body,
+    version: match.text.version,
+    body: match.text.body,
     evidenceMessageId: turn.message.id,
     now: turn.now,
   });
@@ -361,7 +517,7 @@ async function acceptConsent(
 }
 
 // ---------------------------------------------------------------------------
-// Agendamento: dia -> horário -> nome -> confirmação
+// Agendamento: dia -> horário -> nome -> [paciente] -> confirmação
 // ---------------------------------------------------------------------------
 
 /** Até 10 itens por lista; com mais, mostra 9 e um "Mais..." para a página seguinte. */
@@ -382,7 +538,10 @@ async function sendDays(turn: Turn, service: ServiceDefinition, page: number): P
     days.set(dateKey(date), entry);
   }
   if (days.size === 0) {
-    return turn.buttons('info', TEXTS.noSlots(service.label), [BUTTONS.reception, BUTTONS.menu]);
+    return turn.buttons('info', TEXTS.noSlots(service.label, turn.profile), [
+      contactButton(turn.profile),
+      BUTTONS.menu,
+    ]);
   }
 
   const { items, nextPage } = paginate([...days.values()], page);
@@ -457,25 +616,40 @@ async function sendSlots(
   );
 }
 
+/** Nome do paciente menor guardado no funil (cifrado), já decifrado para mostrar. */
+function patientName(turn: Turn): string | undefined {
+  return turn.patientNameEncrypted
+    ? getFieldCipher().decrypt('conversation.patient_name', turn.patientNameEncrypted)
+    : undefined;
+}
+
 async function chooseSlot(turn: Turn, service: ServiceDefinition, startsAt: Date): Promise<void> {
   const slot = await findSlotIfFree(turn.prisma, service.code, startsAt, turn.now, turn.tz);
   if (!slot) {
     await turn.text(TEXTS.slotGone);
     return sendDays(turn, service, 0);
   }
+  const minor = turn.audience === 'minor';
   const name = turn.client ? decryptName(turn.client) : undefined;
-  if (!name) return askName(turn, service, slot.startsAt, TEXTS.askName);
+  if (!name) {
+    const prompt = minor ? TEXTS.askGuardianName : TEXTS.askName;
+    return askName(turn, 'awaiting_name', service, slot.startsAt, prompt);
+  }
+  if (minor && !turn.patientNameEncrypted) {
+    return askName(turn, 'awaiting_patient_name', service, slot.startsAt, TEXTS.askPatientName);
+  }
   return sendConfirmation(turn, service, slot, name);
 }
 
 async function askName(
   turn: Turn,
+  step: 'awaiting_name' | 'awaiting_patient_name',
   service: ServiceDefinition,
   startsAt: Date,
   prompt: string,
 ): Promise<void> {
   await turn.remember({
-    step: 'awaiting_name',
+    step,
     options: [],
     serviceType: service.code,
     startsAt: startsAt.toISOString(),
@@ -483,25 +657,33 @@ async function askName(
   return turn.text(prompt);
 }
 
-async function saveName(turn: Turn, name: string): Promise<void> {
+/** Serviço e horário guardados enquanto o bot espera um nome. */
+function pendingSlot(turn: Turn): { service: ServiceDefinition; startsAt: Date } | undefined {
   const { state } = turn;
-  if (!turn.client || state?.step !== 'awaiting_name' || !state.serviceType || !state.startsAt) {
-    return sendMenu(turn, TEXTS.howCanIHelp);
-  }
-  turn.client = await setClientName(turn.prisma, turn.client.id, name);
+  if (!state?.serviceType || !state.startsAt) return undefined;
   const service = serviceByCode(turn.profile, state.serviceType);
-  if (!service) return sendMenu(turn, TEXTS.howCanIHelp);
-  return chooseSlot(turn, service, new Date(state.startsAt));
+  return service ? { service, startsAt: new Date(state.startsAt) } : undefined;
+}
+
+async function saveName(turn: Turn, name: string): Promise<void> {
+  const pending = pendingSlot(turn);
+  if (!turn.client || !pending) return sendMenu(turn, TEXTS.howCanIHelp);
+  if (turn.state?.step === 'awaiting_patient_name') {
+    // PRIVACIDADE: o nome do menor fica cifrado até virar parte do agendamento.
+    turn.patientNameEncrypted = getFieldCipher().encrypt('conversation.patient_name', name);
+  } else {
+    turn.client = await setClientName(turn.prisma, turn.client.id, name);
+  }
+  return chooseSlot(turn, pending.service, pending.startsAt);
 }
 
 function retryName(turn: Turn): Promise<void> {
-  const { state } = turn;
-  if (state?.step !== 'awaiting_name' || !state.serviceType || !state.startsAt) {
+  const pending = pendingSlot(turn);
+  const step = turn.state?.step;
+  if (!pending || (step !== 'awaiting_name' && step !== 'awaiting_patient_name')) {
     return sendMenu(turn, TEXTS.howCanIHelp);
   }
-  const service = serviceByCode(turn.profile, state.serviceType);
-  if (!service) return sendMenu(turn, TEXTS.howCanIHelp);
-  return askName(turn, service, new Date(state.startsAt), TEXTS.invalidName);
+  return askName(turn, step, pending.service, pending.startsAt, TEXTS.invalidName);
 }
 
 function sendConfirmation(
@@ -515,6 +697,9 @@ function sendConfirmation(
     when: formatDateTime(slot.startsAt, turn.tz),
     minutes: Math.round((slot.endsAt.getTime() - slot.startsAt.getTime()) / 60_000),
     name,
+    patient: turn.audience === 'minor' ? patientName(turn) : undefined,
+    modality: service.modality,
+    profile: turn.profile,
   });
   return turn.buttons('confirming', body, [
     { id: replyIds.confirm(service.code, slot.startsAt), title: 'Confirmar' },
@@ -529,7 +714,14 @@ async function confirmBooking(
   startsAt: Date,
 ): Promise<void> {
   const client = turn.client!; // withConsent garante
-  if (!decryptName(client)) return askName(turn, service, startsAt, TEXTS.askName);
+  const minor = turn.audience === 'minor';
+  if (!decryptName(client)) {
+    return askName(turn, 'awaiting_name', service, startsAt, minor ? TEXTS.askGuardianName : TEXTS.askName);
+  }
+  const patient = minor ? patientName(turn) : undefined;
+  if (minor && !patient) {
+    return askName(turn, 'awaiting_patient_name', service, startsAt, TEXTS.askPatientName);
+  }
   try {
     await bookAppointment(turn.prisma, {
       clientId: client.id,
@@ -537,17 +729,19 @@ async function confirmBooking(
       startsAt,
       now: turn.now,
       timeZone: turn.tz,
+      maxFutureAppointments: turn.profile.maxFutureAppointments,
+      ...(patient
+        ? { minorPatientNameEncrypted: getFieldCipher().encrypt('appointment.patient_name', patient) }
+        : {}),
     });
   } catch (err) {
     if (err instanceof BookingError) return bookingFailed(turn, service, err.reason);
     throw err;
   }
-  await turn.forget();
+  await turn.forget(); // inclusive o nome do menor que estava no estado da conversa
   const when = formatDateTime(startsAt, turn.tz);
-  return turn.buttons('info', TEXTS.booked({ label: service.label, when }), [
-    BUTTONS.myAppointments,
-    BUTTONS.menu,
-  ]);
+  const body = TEXTS.booked({ label: service.label, when, modality: service.modality, profile: turn.profile });
+  return turn.buttons('info', body, [BUTTONS.myAppointments, BUTTONS.menu]);
 }
 
 async function bookingFailed(
@@ -563,7 +757,7 @@ async function bookingFailed(
       await turn.text(TEXTS.clientBusy);
       return sendDays(turn, service, 0);
     case 'too_many_future':
-      return turn.buttons('info', TEXTS.tooMany(), [BUTTONS.myAppointments, BUTTONS.menu]);
+      return turn.buttons('info', TEXTS.tooMany(turn.profile), [BUTTONS.myAppointments, BUTTONS.menu]);
     case 'not_found':
     case 'too_late':
       return sendMenu(turn, TEXTS.howCanIHelp);
@@ -574,6 +768,17 @@ async function bookingFailed(
 // Meus agendamentos e cancelamento
 // ---------------------------------------------------------------------------
 
+/** "Psicologia clínica (Ana)" para atendimento de menor; só o serviço nos demais. */
+function appointmentLabel(
+  turn: Turn,
+  appointment: { serviceType: string; patientIsMinor: boolean; patientNameEncrypted: string | null },
+): string {
+  const label = turn.label(appointment.serviceType);
+  if (!appointment.patientIsMinor) return label;
+  const first = decryptPatientName(appointment)?.split(' ')[0];
+  return `${label} (${first ?? 'menor'})`;
+}
+
 async function myAppointments(turn: Turn): Promise<void> {
   const list = turn.client ? await upcomingAppointments(turn.prisma, turn.client.id, turn.now) : [];
   if (list.length === 0) {
@@ -581,8 +786,9 @@ async function myAppointments(turn: Turn): Promise<void> {
   }
   const shown = list.slice(0, 3); // limite de 3 botões
   const body = TEXTS.appointmentsList(
-    shown.map((a) => ({ label: turn.label(a.serviceType), when: formatDateTime(a.startsAt, turn.tz) })),
+    shown.map((a) => ({ label: appointmentLabel(turn, a), when: formatDateTime(a.startsAt, turn.tz) })),
     list.length - shown.length,
+    turn.profile,
   );
   return turn.buttons(
     'my_appointments',
@@ -595,7 +801,10 @@ async function myAppointments(turn: Turn): Promise<void> {
 }
 
 function tooLate(turn: Turn): Promise<void> {
-  return turn.buttons('info', TEXTS.tooLateToCancel(), [BUTTONS.reception, BUTTONS.menu]);
+  return turn.buttons('info', TEXTS.tooLateToCancel(turn.profile), [
+    contactButton(turn.profile),
+    BUTTONS.menu,
+  ]);
 }
 
 function notFound(turn: Turn): Promise<void> {
@@ -613,7 +822,7 @@ async function cancelAsk(turn: Turn, appointmentId: string): Promise<void> {
     return tooLate(turn);
   }
   const details = {
-    label: turn.label(appointment.serviceType),
+    label: appointmentLabel(turn, appointment),
     when: formatDateTime(appointment.startsAt, turn.tz),
   };
   return turn.buttons('confirming_cancel', TEXTS.confirmCancel(details), [
@@ -637,10 +846,10 @@ async function cancelYes(turn: Turn, appointmentId: string): Promise<void> {
     throw err;
   }
   await turn.forget();
-  const code = appointment.serviceType;
   const when = formatDateTime(appointment.startsAt, turn.tz);
-  return turn.buttons('info', TEXTS.cancelled({ label: turn.label(code), when }), [
-    { id: replyIds.book(code), title: 'Marcar outro horário' },
+  const label = appointmentLabel(turn, appointment);
+  return turn.buttons('info', TEXTS.cancelled({ label, when, profile: turn.profile }), [
+    { id: replyIds.book(appointment.serviceType), title: 'Marcar outro horário' },
     BUTTONS.menu,
   ]);
 }
@@ -656,6 +865,11 @@ async function ownUpcoming(turn: Turn, appointmentId: string) {
     : null;
 }
 
+/** Modalidade do serviço do agendamento (presencial, se o serviço saiu do perfil). */
+function modalityOf(turn: Turn, code: string): 'presencial' | 'online' {
+  return serviceByCode(turn.profile, code)?.modality ?? 'presencial';
+}
+
 async function reminderConfirm(turn: Turn, appointmentId: string): Promise<void> {
   const appointment = await ownUpcoming(turn, appointmentId);
   if (!appointment) return notFound(turn);
@@ -665,11 +879,13 @@ async function reminderConfirm(turn: Turn, appointmentId: string): Promise<void>
     entityType: 'appointment',
     entityId: appointment.id,
   });
-  const when = formatDateTime(appointment.startsAt, turn.tz);
-  const label = turn.label(appointment.serviceType);
-  return turn.buttons('info', TEXTS.attendanceConfirmed({ label, when }), [
-    BUTTONS.menu,
-  ]);
+  const body = TEXTS.attendanceConfirmed({
+    label: appointmentLabel(turn, appointment),
+    when: formatDateTime(appointment.startsAt, turn.tz),
+    modality: modalityOf(turn, appointment.serviceType),
+    profile: turn.profile,
+  });
+  return turn.buttons('info', body, [BUTTONS.menu]);
 }
 
 async function reminderChange(turn: Turn, appointmentId: string): Promise<void> {
@@ -678,9 +894,10 @@ async function reminderChange(turn: Turn, appointmentId: string): Promise<void> 
   const late =
     appointment.startsAt.getTime() - turn.now.getTime() < BOOKING_RULES.cancelMinNoticeMs;
   const body = TEXTS.confirmReschedule({
-    label: turn.label(appointment.serviceType),
+    label: appointmentLabel(turn, appointment),
     when: formatDateTime(appointment.startsAt, turn.tz),
     late,
+    profile: turn.profile,
   });
   return turn.buttons('confirming_cancel', body, [
     { id: replyIds.reschedule(appointment.id), title: 'Sim, remarcar' },
@@ -704,11 +921,13 @@ async function reschedule(turn: Turn, appointmentId: string): Promise<void> {
     throw err;
   }
   const when = formatDateTime(appointment.startsAt, turn.tz);
-  await turn.text(TEXTS.rescheduled({ label: turn.label(appointment.serviceType), when }));
+  const label = appointmentLabel(turn, appointment);
+  await turn.text(TEXTS.rescheduled({ label, when, profile: turn.profile }));
   const service = serviceByCode(turn.profile, appointment.serviceType);
   // Serviço que saiu do perfil: cancelado mesmo assim; a pessoa escolhe outro pelo menu.
   if (!service) return sendMenu(turn, TEXTS.howCanIHelp);
-  return withConsent(turn, service, () => sendDays(turn, service, 0));
+  // Novo agendamento: em perfis com menores, pergunta de novo para quem é.
+  return startBooking(turn, service);
 }
 
 // ---------------------------------------------------------------------------
@@ -727,7 +946,7 @@ function deleteAsk(turn: Turn): Promise<void> {
   if (!turn.client) return turn.buttons('info', TEXTS.noData, [BUTTONS.menu]);
   return turn.buttons(
     'confirming_delete',
-    TEXTS.confirmDelete,
+    TEXTS.confirmDelete(turn.profile),
     [
       { id: replyIds.deleteYes, title: 'Sim, apagar' },
       { id: replyIds.menu, title: 'Não, voltar' },

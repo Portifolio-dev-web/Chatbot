@@ -19,9 +19,11 @@ import type { Db } from './audit.js';
 export const STEPS = [
   'menu',
   'choosing_service',
+  'choosing_audience',
   'choosing_day',
   'choosing_slot',
   'awaiting_name',
+  'awaiting_patient_name',
   'confirming',
   'my_appointments',
   'confirming_cancel',
@@ -38,11 +40,18 @@ export type Option = z.infer<typeof optionSchema>;
 const contextSchema = z.object({
   options: z.array(optionSchema).max(10).default([]),
   /**
-   * Só na etapa awaiting_name: o serviço (código) e o horário escolhidos, à espera do nome
-   * para confirmar. O atendimento confere se o serviço existe no perfil desta instalação.
+   * Nas etapas awaiting_name e awaiting_patient_name: o serviço (código) e o horário
+   * escolhidos, à espera do nome para confirmar. O atendimento confere se o serviço existe no perfil desta instalação.
    */
   serviceType: z.string().regex(SERVICE_CODE).optional(),
   startsAt: z.iso.datetime().optional(),
+  /** Perfis com menores: para quem é a sessão, escolhido no início do funil. */
+  audience: z.enum(['self', 'minor']).optional(),
+  /**
+   * [CRIPTOGRAFADO] Nome do(a) paciente menor, entre a pergunta e a confirmação. Cifrado
+   * como os demais nomes: o estado da conversa fica no banco e não pode guardar nome em claro.
+   */
+  patientNameEncrypted: z.string().max(1000).optional(),
 });
 
 export interface ConversationState extends z.infer<typeof contextSchema> {
@@ -69,6 +78,8 @@ export async function saveState(
     options: state.options,
     ...(state.serviceType ? { serviceType: state.serviceType } : {}),
     ...(state.startsAt ? { startsAt: state.startsAt } : {}),
+    ...(state.audience ? { audience: state.audience } : {}),
+    ...(state.patientNameEncrypted ? { patientNameEncrypted: state.patientNameEncrypted } : {}),
   };
   const data = {
     step: state.step,

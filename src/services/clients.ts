@@ -124,6 +124,12 @@ export async function anonymizeClient(
     for (const appointment of future) {
       await cancelWithinTransaction(tx, appointment, actor, now);
     }
+    // Nome de criança/adolescente que este responsável agendou: sai junto. Sem isso, apagar
+    // o responsável deixaria o nome do menor no histórico.
+    const minorNames = await tx.appointment.updateMany({
+      where: { clientId, patientNameEncrypted: { not: null } },
+      data: { patientNameEncrypted: null },
+    });
     const revoked = await tx.consent.updateMany({
       where: { clientId, revokedAt: null },
       data: { revokedAt: now },
@@ -138,8 +144,20 @@ export async function anonymizeClient(
       action: 'client.anonymized',
       entityType: 'client',
       entityId: clientId,
-      detail: { cancelledAppointments: future.length, revokedConsents: revoked.count },
+      detail: {
+        cancelledAppointments: future.length,
+        revokedConsents: revoked.count,
+        minorNamesErased: minorNames.count,
+      },
     });
     return { cancelledAppointments: future.length, done: true };
   });
+}
+
+export function decryptPatientName(
+  appointment: { patientNameEncrypted: string | null },
+): string | undefined {
+  return appointment.patientNameEncrypted
+    ? getFieldCipher().decrypt('appointment.patient_name', appointment.patientNameEncrypted)
+    : undefined;
 }

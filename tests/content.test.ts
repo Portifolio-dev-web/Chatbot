@@ -9,41 +9,66 @@ const chars = (s: string): number => [...s].length;
 
 describe('aviso de consentimento', () => {
   const url = 'https://exemplo.com/privacidade';
+  const clinic = PROFILES['fisio-personal'];
+  const psi = PROFILES.psicologia;
 
   it('cabe numa mensagem com botões e informa o essencial (LGPD arts. 9º e 11)', () => {
-    const { body } = currentConsentText(url);
-    expect(chars(body)).toBeLessThanOrEqual(1024);
-    expect(body).toContain(CLINIC.legalName); // quem é o responsável
-    expect(body).toContain(url);
-    expect(body).toMatch(/consentimento específico/);
-    expect(body).toMatch(/apagar seus dados/);
+    for (const { body } of [
+      currentConsentText(url, clinic),
+      currentConsentText(url, psi, 'self'),
+      currentConsentText(url, psi, 'minor'),
+    ]) {
+      expect(chars(body)).toBeLessThanOrEqual(1024);
+      expect(body).toContain(CLINIC.legalName); // quem é o responsável
+      expect(body).toContain(url);
+      expect(body).toMatch(/consentimento específico/);
+      expect(body).toMatch(/apagar (seus|os) dados/);
+    }
   });
 
-  it('qualquer mudança no texto gera versão nova', () => {
-    const a = currentConsentText(url);
-    const b = currentConsentText('https://exemplo.com/outra-politica');
+  it('o do responsável por menor cita a LGPD art. 14 e pede a declaração', () => {
+    const { body } = currentConsentText(url, psi, 'minor');
+    expect(body).toMatch(/art. 14/);
+    expect(body).toMatch(/pai, mãe ou responsável legal/);
+    expect(body).toMatch(/avisar a profissional/);
+  });
+
+  it('qualquer mudança no texto gera versão nova; paciente e responsável têm versões próprias', () => {
+    const a = currentConsentText(url, clinic);
+    const b = currentConsentText('https://exemplo.com/outra-politica', clinic);
     expect(a.version.startsWith(`${CONSENT_REVISION}.`)).toBe(true);
     expect(a.version).not.toBe(b.version);
-    expect(currentConsentText(url).version).toBe(a.version); // estável
+    expect(currentConsentText(url, clinic).version).toBe(a.version); // estável
+    expect(currentConsentText(url, psi, 'self').version).not.toBe(
+      currentConsentText(url, psi, 'minor').version,
+    );
   });
 });
 
 describe('conteúdo da clínica', () => {
   it('lista os campos ainda com PREENCHER (o servidor recusa subir em produção)', () => {
     // Enquanto o conteúdo de exemplo estiver no arquivo, estes campos aparecem.
-    expect(unfilledContentFields()).toEqual(
+    expect(unfilledContentFields(PROFILES['fisio-personal'])).toEqual(
       expect.arrayContaining(['name', 'legalName', 'address', 'reception', 'prices']),
     );
+  });
+
+  it('perfil só online não exige endereço', () => {
+    const fields = unfilledContentFields(PROFILES.psicologia);
+    expect(fields).not.toContain('address');
+    expect(fields).toContain('legalName');
   });
 
   it('textos com botões cabem no limite de 1024 caracteres', () => {
     for (const body of [
       ...PROFILE_IDS.map((id) => TEXTS.welcome(PROFILES[id])),
       ...PROFILE_IDS.map((id) => TEXTS.whichService(PROFILES[id])),
-      TEXTS.confirmDelete,
+      ...PROFILE_IDS.map((id) => TEXTS.confirmDelete(PROFILES[id])),
+      ...PROFILE_IDS.map((id) => TEXTS.tooLateToCancel(PROFILES[id])),
+      ...PROFILE_IDS.map((id) => TEXTS.consentDeclined(PROFILES[id])),
+      ...PROFILE_IDS.map((id) => TEXTS.unsupported(PROFILES[id])),
+      TEXTS.crisisSupport,
       TEXTS.privacy('https://exemplo.com/p', true),
-      TEXTS.tooLateToCancel(),
-      TEXTS.consentDeclined(),
     ]) {
       expect(chars(body)).toBeLessThanOrEqual(1024);
     }

@@ -6,7 +6,7 @@ import { getLogger, safeError } from '../lib/logger.js';
 import { formatDateTime } from '../lib/time.js';
 import { isLateCancellation } from './booking.js';
 import { replyIds } from './chatbot/reply-ids.js';
-import { decryptName, decryptPhone } from './clients.js';
+import { decryptName, decryptPatientName, decryptPhone } from './clients.js';
 import { WhatsAppApiError, type TemplateMessage, type WhatsAppClient } from './whatsapp-client.js';
 
 /*
@@ -98,12 +98,15 @@ async function compose(
   if (item.kind === 'CLIENT_REMINDER') {
     const phone = decryptPhone(appointment.client);
     if (appointment.status !== 'CONFIRMED' || appointment.startsAt <= now || !phone) return null;
+    // Modo discreto (psicologia): o lembrete aparece na tela bloqueada e pode ser visto por
+    // outras pessoas; "seu horário de atendimento" não revela o tipo de serviço.
+    const what = deps.profile.discreetReminders ? 'atendimento' : service.toLowerCase();
     return {
       to: phone,
       template: {
         name: TEMPLATES.reminder,
         language: TEMPLATE_LANGUAGE,
-        bodyParams: [name?.split(' ')[0] ?? 'tudo bem', service.toLowerCase(), when],
+        bodyParams: [name?.split(' ')[0] ?? 'tudo bem', what, when],
         quickReplyPayloads: [replyIds.remindOk(appointment.id), replyIds.remindChange(appointment.id)],
       },
     };
@@ -116,12 +119,18 @@ async function compose(
       : isLateCancellation(appointment)
         ? 'cancelamento com menos de 24 h'
         : 'cancelamento';
+  const contact = name ?? 'cliente que pediu para apagar os dados';
+  // Atendimento de menor: a profissional precisa saber quem é o paciente e quem é o
+  // responsável (o cliente que agendou).
+  const who = appointment.patientIsMinor
+    ? `${decryptPatientName(appointment) ?? 'paciente menor'} (menor; resp. ${contact})`
+    : contact;
   return {
     to: deps.receptionPhone,
     template: {
       name: TEMPLATES.receptionNotice,
       language: TEMPLATE_LANGUAGE,
-      bodyParams: [event, name ?? 'cliente que pediu para apagar os dados', service, when],
+      bodyParams: [event, who, service, when],
     },
   };
 }

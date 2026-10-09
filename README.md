@@ -39,7 +39,7 @@ Sem Node instalado, troque `node` por `docker run --rm node:24-alpine node`.
 | `WHATSAPP_APP_SECRET` | App → **Configurações do app → Básico → Chave secreta do aplicativo**. |
 | `WHATSAPP_VERIFY_TOKEN` | Você inventa (valor gerado acima) e cola no painel no passo 4. |
 | `RECEPTION_WHATSAPP` | WhatsApp da recepção (DDI + DDD + número), **diferente** do número do bot. Opcional para testar. |
-| `CLINIC_PROFILE` | Tipo de negócio: `fisio-personal`, `fisioterapia` ou `personal` (veja [Perfis](#perfis)). |
+| `CLINIC_PROFILE` | Tipo de negócio: `fisio-personal`, `fisioterapia`, `personal` ou `psicologia` (veja [Perfis](#perfis)). |
 
 > ⚠️ Guarde `ENCRYPTION_KEY` e `BLIND_INDEX_KEY` num cofre de senhas, fora do backup do banco.
 > Perder a chave = perder nome e telefone de todos os clientes.
@@ -117,6 +117,15 @@ Aviso automático da agenda do WhatsApp: {{1}}. Cliente: {{2}}. Serviço: {{3}}.
 - Sem botões.
 - Exemplos: `novo agendamento` · `Maria Souza` · `Fisioterapia` · `quinta-feira, 09/10 às 08:00`.
 
+**`alerta_risco`** (só perfis com alerta de crise, como `psicologia`; vai para `RECEPTION_WHATSAPP`)
+
+```text
+Alerta automático do WhatsApp: uma pessoa enviou uma mensagem que pode indicar risco. Contato: {{1}}. Recebida em {{2}}. Recomendamos retornar o quanto antes.
+```
+
+- Sem botões.
+- Exemplos: `+5511987654321` · `quinta-feira, 09/10 às 14:32`.
+
 A aprovação leva de minutos a 48 h. Envios feitos antes dela falham com o código `132001` e não
 são repetidos (ficam como `FAILED` na tabela `outbound_messages`): crie os templates antes de
 abrir o bot para clientes.
@@ -146,6 +155,7 @@ Cada instalação atende um tipo de negócio, escolhido em `CLINIC_PROFILE`:
 | `fisio-personal` | Fisioterapia e personal trainer |
 | `fisioterapia` | Só fisioterapia |
 | `personal` | Só personal trainer |
+| `psicologia` | Psicologia clínica online: só a 1ª sessão pelo bot, menores com o responsável, alerta de crise e lembrete discreto |
 
 O perfil define os serviços, o menu, as palavras da triagem ("dor no joelho" → fisioterapia) e
 a grade de exemplo do seed. Os dados do negócio (nome, endereço, preços) continuam em
@@ -156,6 +166,42 @@ a grade de exemplo do seed. Os dados do negócio (nome, endereço, preços) cont
 - **Nunca mude o código** (`code`) de um serviço que já tem agendamentos.
 - **Trocar o perfil de uma instalação** não apaga nada: agendamentos de um serviço que saiu do
   perfil continuam visíveis e canceláveis.
+
+### Perfil `psicologia`
+
+- **Crise:** mensagens com palavras de risco (suicídio, autolesão, violência) recebem na hora
+  CVV 188, SAMU 192 e 190, em **qualquer** perfil. No `psicologia`, a profissional também recebe
+  o template `alerta_risco` com o contato da pessoa, nunca o texto. A detecção é por
+  palavras: deixa passar frases sem elas e às vezes dispara à toa. Deixe isso claro no
+  contrato; não substitui avaliação de risco.
+- **Menores:** o bot pergunta "para mim / para menor de 18 / para outro adulto". Para menor:
+  - o consentimento é do responsável (LGPD art. 14);
+  - o nome do paciente é guardado **criptografado**;
+  - "apagar meus dados" do responsável apaga também o nome do menor.
+- **Discrição:** o lembrete diz "seu horário de *atendimento*", sem "psicologia". O nome de
+  exibição do número do WhatsApp aparece nas notificações: prefira um nome neutro.
+- **Conteúdo** (`src/content/clinic.ts`):
+  - `name` = como ela é conhecida (ex.: "Dra. Fernanda Andrade");
+  - `legalName` = nome completo e CRP;
+  - `reception` = como falar com ela.
+
+  O endereço não é exigido, porque o atendimento é só online.
+
+### Personalizar os horários livres
+
+O seed cria a grade de exemplo do perfil. Para trocar, edite a tabela `availability_rules`
+(horas em minutos desde 00:00: 540 = 9h; `weekday`: 0 = domingo ... 6 = sábado). Mexer na
+grade não afeta agendamentos já marcados. Exemplo: psicologia só terça e quinta, das 18h às
+21h, sessões de 50 min de hora em hora:
+
+```bash
+docker compose exec db psql -U chatbot -d chatbot -c "
+  DELETE FROM availability_rules WHERE service_type = 'PSYCHOTHERAPY';
+  INSERT INTO availability_rules (service_type, weekday, start_minute, end_minute, slot_minutes, session_minutes)
+  VALUES ('PSYCHOTHERAPY', 2, 1080, 1260, 60, 50), ('PSYCHOTHERAPY', 4, 1080, 1260, 60, 50);"
+```
+
+Feriados e férias: `schedule_blocks` (`service_type` nulo = todos os serviços).
 
 ## Desenvolvimento e testes
 

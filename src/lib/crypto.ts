@@ -21,7 +21,12 @@ import { getConfig } from '../config/env.js';
  */
 
 /** Lista oficial dos campos criptografados. O schema marca cada um com [CRIPTOGRAFADO]. */
-export type EncryptedField = 'client.name' | 'client.phone';
+export type EncryptedField =
+  | 'client.name'
+  | 'client.phone'
+  // Nome do(a) paciente menor: no agendamento e, durante o funil, no estado da conversa.
+  | 'appointment.patient_name'
+  | 'conversation.patient_name';
 
 const FORMAT_VERSION = 'v1';
 const IV_BYTES = 12;

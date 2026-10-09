@@ -4,7 +4,7 @@ import type { DestinationStream } from 'pino';
 import { scheduleRows } from '../src/content/default-schedule.js';
 import type { PrismaClient } from '../src/generated/prisma/client.js';
 import { createLogger } from '../src/lib/logger.js';
-import { PROFILES } from '../src/profiles/index.js';
+import { PROFILES, type Profile } from '../src/profiles/index.js';
 import { createWhatsAppClient, type WhatsAppClient } from '../src/services/whatsapp-client.js';
 
 /** Corpo de uma mensagem enviada à Graph API (como a Meta recebe). */
@@ -106,8 +106,11 @@ export function textMessage(overrides: Record<string, unknown> = {}): Record<str
  * regras que faltam. Antes, os testes só criavam a grade se a tabela estivesse VAZIA: uma
  * regra solta deixada por outro teste (ou à mão) bastava para faltar horário.
  */
-export async function ensureDefaultSchedule(prisma: PrismaClient): Promise<void> {
-  for (const row of scheduleRows(PROFILES['fisio-personal'].defaultSchedule)) {
+export async function ensureDefaultSchedule(
+  prisma: PrismaClient,
+  profile: Profile = PROFILES['fisio-personal'],
+): Promise<void> {
+  for (const row of scheduleRows(profile.defaultSchedule)) {
     if (!(await prisma.availabilityRule.findFirst({ where: { ...row, active: true } }))) {
       await prisma.availabilityRule.create({ data: row });
     }

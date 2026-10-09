@@ -86,20 +86,25 @@ model Client {
 
 /// Consulta de fisioterapia ou sessão de treino.
 model Appointment {
-  id          String            @id @default(uuid(7)) @db.Uuid
-  clientId    String            @map("client_id") @db.Uuid
+  id                   String            @id @default(uuid(7)) @db.Uuid
+  clientId             String            @map("client_id") @db.Uuid
   /// Restrict: o histórico de agendamentos sobrevive à anonimização do cliente.
-  client      Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  client               Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
   /// Código do serviço, definido pelo perfil (src/profiles). Texto, e não enum do banco: cada
   /// perfil tem seus serviços, e um perfil novo não exige migração.
-  serviceType String            @map("service_type") @db.VarChar(40)
-  startsAt    DateTime          @map("starts_at") @db.Timestamptz(3)
-  endsAt      DateTime          @map("ends_at") @db.Timestamptz(3)
-  status      AppointmentStatus @default(CONFIRMED)
-  cancelledAt DateTime?         @map("cancelled_at") @db.Timestamptz(3)
-  cancelledBy Actor?            @map("cancelled_by")
-  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+  serviceType          String            @map("service_type") @db.VarChar(40)
+  startsAt             DateTime          @map("starts_at") @db.Timestamptz(3)
+  endsAt               DateTime          @map("ends_at") @db.Timestamptz(3)
+  status               AppointmentStatus @default(CONFIRMED)
+  cancelledAt          DateTime?         @map("cancelled_at") @db.Timestamptz(3)
+  cancelledBy          Actor?            @map("cancelled_by")
+  /// Atendimento de criança/adolescente marcado pelo responsável (o cliente). LGPD art. 14.
+  patientIsMinor       Boolean           @default(false) @map("patient_is_minor")
+  /// [CRIPTOGRAFADO] Nome do(a) paciente quando é menor (o cliente é o responsável). Apagado
+  /// junto na anonimização do responsável.
+  patientNameEncrypted String?           @map("patient_name_encrypted")
+  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
 
   outboundMessages OutboundMessage[]
 
@@ -115,16 +120,19 @@ model Appointment {
 /// Grade semanal de atendimento. Horários livres = grade - bloqueios - agendamentos.
 /// Horas em minutos desde 00:00 no fuso da clínica: 480 = 08:00, 1080 = 18:00.
 model AvailabilityRule {
-  id          Int     @id @default(autoincrement())
-  serviceType String  @map("service_type") @db.VarChar(40)
+  id             Int     @id @default(autoincrement())
+  serviceType    String  @map("service_type") @db.VarChar(40)
   /// 0 = domingo ... 6 = sábado.
-  weekday     Int     @db.SmallInt
-  startMinute Int     @map("start_minute") @db.SmallInt
-  endMinute   Int     @map("end_minute") @db.SmallInt
-  /// Duração de cada atendimento. Os horários oferecidos começam em startMinute, em passos
-  /// deste tamanho, sem passar de endMinute.
-  slotMinutes Int     @map("slot_minutes") @db.SmallInt
-  active      Boolean @default(true)
+  weekday        Int     @db.SmallInt
+  startMinute    Int     @map("start_minute") @db.SmallInt
+  endMinute      Int     @map("end_minute") @db.SmallInt
+  /// Intervalo entre horários: os oferecidos começam em startMinute, em passos deste tamanho,
+  /// e o atendimento termina até endMinute.
+  slotMinutes    Int     @map("slot_minutes") @db.SmallInt
+  /// Duração do atendimento quando é menor que o intervalo (ex.: sessão de 50 min começando
+  /// de hora em hora). Nulo = igual ao intervalo.
+  sessionMinutes Int?    @map("session_minutes") @db.SmallInt
+  active         Boolean @default(true)
 
   @@index([serviceType, weekday])
   @@map("availability_rules")

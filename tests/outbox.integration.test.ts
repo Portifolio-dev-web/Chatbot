@@ -62,7 +62,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
   async function client(at = now) {
     const phone = `55319${randomInt(10_000_000, 99_999_999)}`;
     const name = `Teste${randomBytes(3).toString('hex')} Sobrenome`;
-    const consent = currentConsentText(POLICY);
+    const consent = currentConsentText(POLICY, PROFILES['fisio-personal']);
     const c = await recordConsent(prisma, {
       phone,
       version: consent.version,
@@ -143,7 +143,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
 
     // A cliente toca em "Confirmo".
     const chat = recordingWhatsApp();
-    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile: PROFILES['fisio-personal'], now: () => remindAt });
+    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile: PROFILES['fisio-personal'], alertPhone: undefined, now: () => remindAt });
     await bot.handle({
       id: `wamid.T_${randomBytes(6).toString('hex')}`,
       from: sara.phone,
@@ -165,7 +165,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
 
     const late = new Date(appt.startsAt.getTime() - 20 * 3600_000); // 20 h antes
     const chat = recordingWhatsApp();
-    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile: PROFILES['fisio-personal'], now: () => late });
+    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile: PROFILES['fisio-personal'], alertPhone: undefined, now: () => late });
     const tap = (replyId: string) =>
       bot.handle({
         id: `wamid.T_${randomBytes(6).toString('hex')}`,

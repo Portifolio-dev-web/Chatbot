@@ -28,7 +28,7 @@ function main(): void {
 
   // Em produção, conteúdo da clínica com "PREENCHER" impede a subida: o bot não pode mandar
   // endereço ou preço de exemplo para um cliente de verdade.
-  const unfilled = unfilledContentFields();
+  const unfilled = unfilledContentFields(config.profile);
   if (config.isProduction && unfilled.length > 0) {
     console.error(
       'Conteúdo da clínica incompleto (src/content/clinic.ts). O servidor não vai subir.\n' +
@@ -63,6 +63,8 @@ function main(): void {
       timeZone: config.clinic.timezone,
       privacyPolicyUrl: config.privacyPolicyUrl,
       profile: config.profile,
+      // Alerta de crise (perfis com crisisAlert) vai para o mesmo WhatsApp dos avisos.
+      alertPhone: config.clinic.receptionWhatsapp,
     }),
   });
 

@@ -1,7 +1,8 @@
+import { BOOKING_RULES } from '../config/business-rules.js';
 import { normalize } from '../lib/text.js';
 import { SERVICE_CODE, type Profile, type ScheduleTemplate, type ServiceDefinition } from './types.js';
 
-export type { Profile, ScheduleTemplate, ServiceDefinition } from './types.js';
+export type { Modality, Profile, ScheduleTemplate, ServiceDefinition } from './types.js';
 
 /*
  * Catálogo de perfis. Para criar um perfil novo:
@@ -35,6 +36,7 @@ const PHYSIOTHERAPY: ServiceDefinition = {
     'cirurgia',
     'operatorio',
   ],
+  modality: 'presencial',
 };
 
 const PERSONAL_TRAINING: ServiceDefinition = {
@@ -56,6 +58,38 @@ const PERSONAL_TRAINING: ServiceDefinition = {
     'condicionamento',
     'musculacao',
   ],
+  modality: 'presencial',
+};
+
+/**
+ * Psicologia clínica, só online. O bot marca apenas a PRIMEIRA sessão: as seguintes a
+ * profissional combina direto com o paciente. A triagem nunca pergunta a queixa.
+ */
+const PSYCHOTHERAPY: ServiceDefinition = {
+  code: 'PSYCHOTHERAPY',
+  label: 'Psicologia clínica',
+  menuDescription: 'Primeira sessão online, 50 min',
+  suggestion:
+    'Para cuidar da saúde emocional, o caminho é a *psicologia clínica*. ' +
+    'Quer agendar a primeira sessão (online, 50 min)?',
+  keywords: [
+    'psicologa',
+    'psicologo',
+    'psicologia',
+    'psicoterapia',
+    'terapia',
+    'terapeuta',
+    'ansiedade',
+    'ansioso',
+    'ansiosa',
+    'depressao',
+    'emocional',
+    'tristeza',
+    'estresse',
+    'luto',
+    'autoestima',
+  ],
+  modality: 'online',
 };
 
 const MON_FRI = [1, 2, 3, 4, 5];
@@ -89,24 +123,66 @@ const PERSONAL_SCHEDULE: ScheduleTemplate[] = [
   },
 ];
 
+const PSYCHOTHERAPY_SCHEDULE: ScheduleTemplate = {
+  serviceCode: PSYCHOTHERAPY.code,
+  weekdays: MON_FRI,
+  windows: [
+    ['09:00', '12:00'],
+    ['14:00', '20:00'],
+  ],
+  slotMinutes: 60,
+  sessionMinutes: 50,
+};
+
+/** Clínicas de fisioterapia/treino: recepção, até 3 horários futuros, só adultos. */
+const CLINIC_DEFAULTS = {
+  staff: { contactLabel: 'Falar com a recepção', noun: 'a recepção' },
+  maxFutureAppointments: BOOKING_RULES.maxFutureAppointments,
+  audience: 'adults',
+  crisisAlert: false,
+  discreetReminders: false,
+} as const;
+
 export const PROFILES = {
   'fisio-personal': {
     id: 'fisio-personal',
     description: 'Clínica com fisioterapia e personal trainer',
     services: [PHYSIOTHERAPY, PERSONAL_TRAINING],
     defaultSchedule: [PHYSIOTHERAPY_SCHEDULE, ...PERSONAL_SCHEDULE],
+    ...CLINIC_DEFAULTS,
   },
   fisioterapia: {
     id: 'fisioterapia',
     description: 'Clínica ou fisioterapeuta (só fisioterapia)',
     services: [PHYSIOTHERAPY],
     defaultSchedule: [PHYSIOTHERAPY_SCHEDULE],
+    ...CLINIC_DEFAULTS,
   },
   personal: {
     id: 'personal',
     description: 'Personal trainer ou estúdio (só treino)',
     services: [PERSONAL_TRAINING],
     defaultSchedule: PERSONAL_SCHEDULE,
+    ...CLINIC_DEFAULTS,
+  },
+  psicologia: {
+    id: 'psicologia',
+    description: 'Psicologia clínica online (o bot marca só a primeira sessão)',
+    services: [PSYCHOTHERAPY],
+    defaultSchedule: [PSYCHOTHERAPY_SCHEDULE],
+    // Sem recepção: quem atende o contato humano é a própria profissional.
+    staff: { contactLabel: 'Contato direto', noun: 'a profissional' },
+    // Só a 1ª sessão pelo bot; as seguintes são combinadas direto com a profissional.
+    maxFutureAppointments: 1,
+    audience: 'adults_and_minors',
+    crisisAlert: true,
+    // O lembrete aparece na tela bloqueada: "seu horário de atendimento", sem "psicologia".
+    discreetReminders: true,
+    welcomeNote:
+      '⚠️ Este canal é automático e *não atende emergências*. Em crise, ligue *188* (CVV, ' +
+      '24 h) ou *192* (SAMU).\n' +
+      'Por privacidade, não conte aqui detalhes do que está sentindo: isso fica para a sessão.\n' +
+      'Já é paciente? Combine os próximos horários diretamente com a profissional.',
   },
 } as const satisfies Record<string, Profile>;
 
@@ -144,6 +220,14 @@ export function validateProfile(profile: Profile): string[] {
   }
   for (const t of profile.defaultSchedule) {
     if (!codes.has(t.serviceCode)) problems.push(`grade usa serviço fora do perfil: ${t.serviceCode}`);
+    if (t.sessionMinutes !== undefined && t.sessionMinutes > t.slotMinutes) {
+      problems.push(`${t.serviceCode}: sessão maior que o intervalo entre horários`);
+    }
+  }
+  if ([...profile.staff.contactLabel].length > 20) problems.push('contactLabel passa de 20 caracteres');
+  // "Meus agendamentos" mostra um botão de cancelar por horário: no máximo 3.
+  if (profile.maxFutureAppointments < 1 || profile.maxFutureAppointments > 3) {
+    problems.push('maxFutureAppointments precisa ficar entre 1 e 3');
   }
   // A mesma palavra em dois serviços do perfil deixaria a triagem sempre em dúvida.
   const seen = new Map<string, string>();

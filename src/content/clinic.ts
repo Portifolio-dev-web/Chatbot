@@ -6,6 +6,8 @@
  *
  * Formatação do WhatsApp: *negrito*, _itálico_, quebras de linha com \n.
  */
+import type { Profile } from '../profiles/index.js';
+
 export const PLACEHOLDER = 'PREENCHER';
 
 export const CLINIC = {
@@ -31,9 +33,14 @@ export const CLINIC = {
 // Os SERVIÇOS (nome, descrição, triagem) não ficam aqui: vêm do perfil da instalação
 // (CLINIC_PROFILE, src/profiles). Este arquivo guarda só os dados do negócio.
 
-/** Campos ainda com "PREENCHER" (vazio = conteúdo pronto). */
-export function unfilledContentFields(): string[] {
+/**
+ * Campos ainda com "PREENCHER" (vazio = conteúdo pronto). Num perfil só online (psicologia),
+ * o endereço não aparece em lugar nenhum e não é exigido.
+ */
+export function unfilledContentFields(profile: Profile): string[] {
+  const online = profile.services.every((service) => service.modality === 'online');
   return Object.entries(CLINIC)
+    .filter(([key]) => !(online && (key === 'address' || key === 'mapsUrl')))
     .filter(([, value]) => value.includes(PLACEHOLDER))
     .map(([key]) => key);
 }

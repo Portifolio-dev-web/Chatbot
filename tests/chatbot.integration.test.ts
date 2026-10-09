@@ -55,9 +55,13 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
   });
 
   /** Uma pessoa conversando com o bot. Devolve as mensagens que o bot mandou a cada ação. */
-  function person(phone = randomPhone(), profile: Profile = PROFILES['fisio-personal']) {
+  function person(
+    phone = randomPhone(),
+    profile: Profile = PROFILES['fisio-personal'],
+    alertPhone: string | undefined = undefined,
+  ) {
     const { whatsapp, sent } = recordingWhatsApp();
-    const bot = createChatbot({ prisma, whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile, now: () => now });
+    const bot = createChatbot({ prisma, whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile, alertPhone, now: () => now });
     let seen = 0;
     let lastMessageId = '';
     async function send(content: MessageContent): Promise<SentMessage[]> {
@@ -79,7 +83,7 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
   /** Cliente já com consentimento e nome (atalho para testes que não são do funil). */
   async function readyClient(name = 'Cliente Pronto') {
     const p = person();
-    const consent = currentConsentText(POLICY);
+    const consent = currentConsentText(POLICY, PROFILES['fisio-personal']);
     const client = await recordConsent(prisma, {
       phone: p.phone,
       version: consent.version,
@@ -112,7 +116,7 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
     expect(client).not.toBeNull();
     const consent = await prisma.consent.findFirstOrThrow({ where: { clientId: client!.id } });
     expect(consent).toMatchObject({
-      textVersion: currentConsentText(POLICY).version,
+      textVersion: currentConsentText(POLICY, PROFILES['fisio-personal']).version,
       evidenceMessageId: evidence,
       revokedAt: null,
     });

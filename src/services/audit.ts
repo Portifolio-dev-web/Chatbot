@@ -12,7 +12,8 @@ export async function audit(
   event: {
     actor: Actor;
     action: string;
-    entityType: 'client' | 'appointment' | 'consent';
+    // 'contact': quem ainda não é cliente (ex.: alerta de crise); o id é o índice cego do telefone.
+    entityType: 'client' | 'appointment' | 'consent' | 'contact';
     entityId: string;
     detail?: Prisma.InputJsonObject;
   },
