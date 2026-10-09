@@ -11,6 +11,7 @@ const fake: Record<string, string> = {
   WHATSAPP_PHONE_NUMBER_ID: '123456789012345',
   ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64'),
   BLIND_INDEX_KEY: Buffer.alloc(32, 2).toString('base64'),
+  CLINIC_PROFILE: 'fisio-personal',
 };
 
 for (const [key, value] of Object.entries(fake)) process.env[key] = value;

@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { PROFILE_IDS, PROFILES, type Profile, type ProfileId } from '../profiles/index.js';
 
 // Carrega o .env se ele existir (desenvolvimento). Em produção as variáveis vêm da plataforma
 // (Render, Railway, docker compose) e o .env nem entra na imagem. Não sobrescreve o que já
@@ -73,6 +74,13 @@ const schema = z.object({
     .optional()
     .refine((v) => splitKeys(v).every(isKey32), `cada chave antiga: ${KEY_HINT}`),
   BLIND_INDEX_KEY: z.string({ error: 'obrigatória' }).refine(isKey32, KEY_HINT),
+
+  // Perfis: qual tipo de negócio esta instalação atende (src/profiles). Obrigatório em TODOS
+  // os ambientes: instalar o perfil errado num cliente (bot de personal numa clínica de
+  // fisioterapia) é um erro caro e silencioso; melhor o servidor recusar subir.
+  CLINIC_PROFILE: z.enum(PROFILE_IDS, {
+    error: `obrigatório; use um destes perfis: ${PROFILE_IDS.join(', ')}`,
+  }),
 
   CLINIC_TIMEZONE: z
     .string()
@@ -149,6 +157,9 @@ export interface AppConfig {
     /** Só dígitos. Fora de produção pode faltar: os avisos à recepção ficam esperando na fila. */
     receptionWhatsapp: string | undefined;
   };
+  /** Perfil desta instalação (serviços, menu, triagem). */
+  profileId: ProfileId;
+  profile: Profile;
   privacyPolicyUrl: string | undefined;
   /** Avisos de inicialização para o servidor registrar no log (sem valores de segredos). */
   warnings: string[];
@@ -224,6 +235,8 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
       blindIndexKey: Buffer.from(cfg.BLIND_INDEX_KEY, 'base64'),
     },
     clinic: { timezone: cfg.CLINIC_TIMEZONE, receptionWhatsapp: cfg.RECEPTION_WHATSAPP },
+    profileId: cfg.CLINIC_PROFILE,
+    profile: PROFILES[cfg.CLINIC_PROFILE],
     privacyPolicyUrl: cfg.PRIVACY_POLICY_URL,
     warnings,
   };

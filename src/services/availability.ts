@@ -1,5 +1,4 @@
 import { BOOKING_RULES } from '../config/business-rules.js';
-import type { ServiceType } from '../generated/prisma/client.js';
 import { addDays, compareDates, localDateOf, weekdayOf, zonedToUtc } from '../lib/time.js';
 import type { Db } from './audit.js';
 
@@ -64,7 +63,7 @@ export function bookingWindow(now: Date): { from: Date; to: Date } {
 
 export async function findFreeSlots(
   db: Db,
-  serviceType: ServiceType,
+  serviceType: string,
   window: { from: Date; to: Date },
   timeZone: string,
 ): Promise<Interval[]> {
@@ -98,7 +97,7 @@ export async function findFreeSlots(
 /** O horário exato ainda está livre e dentro da janela? Devolve o horário (com o fim) ou undefined. */
 export async function findSlotIfFree(
   db: Db,
-  serviceType: ServiceType,
+  serviceType: string,
   startsAt: Date,
   now: Date,
   timeZone: string,

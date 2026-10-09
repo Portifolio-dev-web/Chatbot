@@ -2,8 +2,8 @@ import { randomBytes, randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { OUTBOX } from '../src/config/business-rules.js';
 import { currentConsentText } from '../src/content/consent.js';
-import { defaultScheduleRows } from '../src/content/default-schedule.js';
-import type { PrismaClient, ServiceType } from '../src/generated/prisma/client.js';
+import type { PrismaClient } from '../src/generated/prisma/client.js';
+import { PROFILES } from '../src/profiles/index.js';
 import { setLoggerForTesting } from '../src/lib/logger.js';
 import { createPrismaClient } from '../src/lib/prisma.js';
 import { addDays, formatDateTime, weekdayOf, zonedToUtc } from '../src/lib/time.js';
@@ -14,7 +14,7 @@ import { replyIds } from '../src/services/chatbot/reply-ids.js';
 import { recordConsent, setClientName } from '../src/services/clients.js';
 import { runMaintenance } from '../src/services/maintenance.js';
 import { processOutbox, type OutboxDeps } from '../src/services/outbox.js';
-import { captureLogs, recordingWhatsApp, type SentMessage } from './fixtures.js';
+import { captureLogs, ensureDefaultSchedule, recordingWhatsApp, type SentMessage } from './fixtures.js';
 
 /*
  * Fila de lembretes/avisos e rotina de retenção contra um PostgreSQL de verdade
@@ -51,9 +51,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
     prisma = createPrismaClient(url!);
     now = randomMonday8am();
     setLoggerForTesting(logs.logger);
-    if ((await prisma.availabilityRule.count()) === 0) {
-      await prisma.availabilityRule.createMany({ data: defaultScheduleRows() });
-    }
+    await ensureDefaultSchedule(prisma);
   });
   afterAll(async () => {
     setLoggerForTesting(undefined);
@@ -77,7 +75,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
   }
 
   /** Marca no k-ésimo horário livre com mais de 48 h de antecedência. */
-  async function book(clientId: string, k: number, service: ServiceType = 'PHYSIOTHERAPY') {
+  async function book(clientId: string, k: number, service: string = 'PHYSIOTHERAPY') {
     const free = (await findFreeSlots(prisma, service, bookingWindow(now), SP)).filter(
       (s) => s.startsAt.getTime() - now.getTime() > 2 * DAY,
     );
@@ -87,7 +85,13 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
   function outbox(options: Parameters<typeof recordingWhatsApp>[0] & { withReception?: boolean } = {}) {
     const recorder = recordingWhatsApp(options);
     const receptionPhone = options.withReception === false ? undefined : RECEPTION;
-    const deps: OutboxDeps = { prisma, whatsapp: recorder.whatsapp, timeZone: SP, receptionPhone };
+    const deps: OutboxDeps = {
+      prisma,
+      whatsapp: recorder.whatsapp,
+      timeZone: SP,
+      receptionPhone,
+      profile: PROFILES['fisio-personal'],
+    };
     /** Processa até não sobrar nada vencido em `at` (a fila pode ter itens de outros testes). */
     async function drain(at: Date) {
       while ((await processOutbox(deps, at)).claimed > 0);
@@ -139,7 +143,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
 
     // A cliente toca em "Confirmo".
     const chat = recordingWhatsApp();
-    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, now: () => remindAt });
+    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile: PROFILES['fisio-personal'], now: () => remindAt });
     await bot.handle({
       id: `wamid.T_${randomBytes(6).toString('hex')}`,
       from: sara.phone,
@@ -161,7 +165,7 @@ describe.skipIf(!url)('fila de mensagens e retenção (integração)', () => {
 
     const late = new Date(appt.startsAt.getTime() - 20 * 3600_000); // 20 h antes
     const chat = recordingWhatsApp();
-    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, now: () => late });
+    const bot = createChatbot({ prisma, whatsapp: chat.whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile: PROFILES['fisio-personal'], now: () => late });
     const tap = (replyId: string) =>
       bot.handle({
         id: `wamid.T_${randomBytes(6).toString('hex')}`,

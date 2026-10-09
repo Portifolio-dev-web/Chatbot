@@ -1,10 +1,15 @@
 import { BOOKING_RULES, MESSAGE_RATE_LIMIT } from '../../config/business-rules.js';
-import { SERVICES } from '../../content/clinic.js';
 import { currentConsentText } from '../../content/consent.js';
-import type { Client, PrismaClient, ServiceType } from '../../generated/prisma/client.js';
+import type { Client, PrismaClient } from '../../generated/prisma/client.js';
 import { createKeyedMutex, createRateLimiter } from '../../lib/concurrency.js';
 import { phoneIndex } from '../../lib/crypto.js';
 import { getLogger, safeError } from '../../lib/logger.js';
+import {
+  serviceByCode,
+  serviceLabel,
+  type Profile,
+  type ServiceDefinition,
+} from '../../profiles/index.js';
 import {
   addDays,
   dateKey,
@@ -48,7 +53,7 @@ import type { InboundMessage } from '../webhook-parser.js';
 import type { ListSection, ReplyButton, WhatsAppClient } from '../whatsapp-client.js';
 import { interpret, type FaqTopic, type Intent } from './intents.js';
 import { replyIds } from './reply-ids.js';
-import { BUTTONS, MENU_SECTIONS, TEXTS, serviceButtons } from './texts.js';
+import { BUTTONS, TEXTS, buildMenu, serviceButtons } from './texts.js';
 
 /*
  * O atendimento: recebe uma mensagem, entende a intenção (intents.ts), responde e guarda a
@@ -58,6 +63,8 @@ import { BUTTONS, MENU_SECTIONS, TEXTS, serviceButtons } from './texts.js';
  * (só na 1ª vez) -> confirmação. Cada etapa revalida o que importa (consentimento vigente,
  * horário ainda livre, agendamento pertence a quem pede), porque o cliente pode tocar num
  * botão de uma mensagem antiga.
+ *
+ * Os serviços oferecidos vêm do PERFIL da instalação (CLINIC_PROFILE, src/profiles).
  */
 
 export interface ChatbotDeps {
@@ -65,6 +72,8 @@ export interface ChatbotDeps {
   whatsapp: WhatsAppClient;
   timeZone: string;
   privacyPolicyUrl: string | undefined;
+  /** Perfil da instalação: serviços, menu e triagem. */
+  profile: Profile;
   now?: () => Date;
 }
 
@@ -83,6 +92,13 @@ class Turn {
   }
   get tz(): string {
     return this.deps.timeZone;
+  }
+  get profile(): Profile {
+    return this.deps.profile;
+  }
+  /** Nome do serviço de um agendamento (pode ser de um serviço que saiu do perfil). */
+  label(code: string): string {
+    return serviceLabel(this.deps.profile, code);
   }
 
   async text(body: string): Promise<void> {
@@ -153,7 +169,7 @@ async function handleTurn(deps: ChatbotDeps, message: InboundMessage, now: Date)
   const client = await findClientByPhone(deps.prisma, message.from);
   if (client) await touchClient(deps.prisma, client.id, now);
   const state = client ? await loadState(deps.prisma, client.id, now) : null;
-  const intent = interpret(message.content, state);
+  const intent = interpret(message.content, state, deps.profile);
 
   // PRIVACIDADE: só a intenção e a etapa; nunca o texto, o nome ou o telefone.
   logger.info({ intent: intent.kind, step: state?.step ?? null, knownClient: client !== null }, 'atendimento');
@@ -167,10 +183,19 @@ async function handleTurn(deps: ChatbotDeps, message: InboundMessage, now: Date)
   }
 }
 
+type ServiceIntent = Extract<Intent, { service: string }>;
+
 async function respond(turn: Turn, intent: Intent): Promise<void> {
+  if ('service' in intent) {
+    const service = serviceByCode(turn.profile, intent.service);
+    // Serviço que não existe neste perfil: botão de outra instalação, de antes de uma troca
+    // de perfil, ou id forjado. Nada é agendado; a pessoa volta ao menu.
+    if (!service) return sendMenu(turn, TEXTS.didNotUnderstand);
+    return respondForService(turn, intent, service);
+  }
   switch (intent.kind) {
     case 'menu':
-      return sendMenu(turn, intent.greeting ? TEXTS.welcome() : TEXTS.howCanIHelp);
+      return sendMenu(turn, intent.greeting ? TEXTS.welcome(turn.profile) : TEXTS.howCanIHelp);
     case 'unknown':
       return sendMenu(turn, TEXTS.didNotUnderstand);
     case 'unsupported':
@@ -178,34 +203,16 @@ async function respond(turn: Turn, intent: Intent): Promise<void> {
     case 'thanks':
       return turn.buttons('info', TEXTS.thanks, [BUTTONS.menu]);
     case 'ask_service':
-      return turn.buttons('choosing_service', TEXTS.whichService, serviceButtons());
-    case 'suggest':
-      return suggestService(turn, intent.service);
+      return askService(turn);
     case 'faq':
       return sendFaq(turn, intent.topic);
     case 'reception':
       return turn.buttons('info', TEXTS.reception(), [BUTTONS.menu]);
-    case 'book':
-      return withConsent(turn, intent.service, () => sendDays(turn, intent.service, 0));
-    case 'consent':
-      return acceptConsent(turn, intent.service, intent.version);
     case 'consent_declined':
       await turn.forget();
       return turn.buttons('info', TEXTS.consentDeclined(), [BUTTONS.menu]);
     case 'consent_typed':
-      return turn.buttons('choosing_service', TEXTS.consentNeedsButton, serviceButtons());
-    case 'days':
-      return withConsent(turn, intent.service, () => sendDays(turn, intent.service, intent.page));
-    case 'day':
-      return withConsent(turn, intent.service, () =>
-        sendSlots(turn, intent.service, intent.day, intent.page),
-      );
-    case 'slot':
-      return withConsent(turn, intent.service, () => chooseSlot(turn, intent.service, intent.startsAt));
-    case 'confirm':
-      return withConsent(turn, intent.service, () =>
-        confirmBooking(turn, intent.service, intent.startsAt),
-      );
+      return consentTyped(turn);
     case 'name':
       return saveName(turn, intent.name);
     case 'invalid_name':
@@ -231,18 +238,52 @@ async function respond(turn: Turn, intent: Intent): Promise<void> {
   }
 }
 
+async function respondForService(
+  turn: Turn,
+  intent: ServiceIntent,
+  service: ServiceDefinition,
+): Promise<void> {
+  switch (intent.kind) {
+    case 'suggest':
+      return suggestService(turn, service);
+    case 'book':
+      return withConsent(turn, service, () => sendDays(turn, service, 0));
+    case 'consent':
+      return acceptConsent(turn, service, intent.version);
+    case 'days':
+      return withConsent(turn, service, () => sendDays(turn, service, intent.page));
+    case 'day':
+      return withConsent(turn, service, () => sendSlots(turn, service, intent.day, intent.page));
+    case 'slot':
+      return withConsent(turn, service, () => chooseSlot(turn, service, intent.startsAt));
+    case 'confirm':
+      return withConsent(turn, service, () => confirmBooking(turn, service, intent.startsAt));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Menu, triagem e dúvidas frequentes
 // ---------------------------------------------------------------------------
 
 function sendMenu(turn: Turn, body: string): Promise<void> {
-  return turn.list('menu', body, 'Ver opções', MENU_SECTIONS);
+  return turn.list('menu', body, 'Ver opções', buildMenu(turn.profile));
+}
+
+/** Com um serviço só no perfil, não há o que perguntar: vai direto para o agendamento. */
+function askService(turn: Turn): Promise<void> {
+  const [only, ...others] = turn.profile.services;
+  if (only && others.length === 0) return withConsent(turn, only, () => sendDays(turn, only, 0));
+  return turn.buttons(
+    'choosing_service',
+    TEXTS.whichService(turn.profile),
+    serviceButtons(turn.profile),
+  );
 }
 
 /** Triagem: a pessoa descreveu o que procura ("dor no joelho"); sugerimos o serviço. */
-function suggestService(turn: Turn, service: ServiceType): Promise<void> {
-  return turn.buttons('choosing_service', SERVICES[service].suggestion, [
-    { id: replyIds.book(service), title: 'Agendar' },
+function suggestService(turn: Turn, service: ServiceDefinition): Promise<void> {
+  return turn.buttons('choosing_service', service.suggestion, [
+    { id: replyIds.book(service.code), title: 'Agendar' },
     BUTTONS.menu,
   ]);
 }
@@ -262,7 +303,7 @@ async function sendFaq(turn: Turn, topic: FaqTopic): Promise<void> {
 
 async function withConsent(
   turn: Turn,
-  service: ServiceType,
+  service: ServiceDefinition,
   next: () => Promise<void>,
 ): Promise<void> {
   const { version } = currentConsentText(turn.deps.privacyPolicyUrl);
@@ -270,21 +311,39 @@ async function withConsent(
   return sendConsentPrompt(turn, service);
 }
 
-function sendConsentPrompt(turn: Turn, service: ServiceType): Promise<void> {
+function sendConsentPrompt(turn: Turn, service: ServiceDefinition): Promise<void> {
   const consent = currentConsentText(turn.deps.privacyPolicyUrl);
   // A versão vai no id do botão: o toque prova QUAL texto a pessoa leu.
   return turn.buttons(
     'choosing_service',
     consent.body,
     [
-      { id: replyIds.consentYes(service, consent.version), title: 'Concordo' },
+      { id: replyIds.consentYes(service.code, consent.version), title: 'Concordo' },
       { id: replyIds.consentNo, title: 'Não concordo' },
     ],
     { typedChoice: false },
   );
 }
 
-async function acceptConsent(turn: Turn, service: ServiceType, version: string): Promise<void> {
+/** "concordo" digitado não vale como consentimento (precisa do toque no botão). */
+async function consentTyped(turn: Turn): Promise<void> {
+  const [only, ...others] = turn.profile.services;
+  if (only && others.length === 0) {
+    await turn.text(TEXTS.consentNeedsButton);
+    return sendConsentPrompt(turn, only);
+  }
+  return turn.buttons(
+    'choosing_service',
+    `${TEXTS.consentNeedsButton} ${TEXTS.whichServiceShort}`,
+    serviceButtons(turn.profile),
+  );
+}
+
+async function acceptConsent(
+  turn: Turn,
+  service: ServiceDefinition,
+  version: string,
+): Promise<void> {
   const consent = currentConsentText(turn.deps.privacyPolicyUrl);
   if (version !== consent.version) {
     // Tocou no "Concordo" de um aviso antigo: o texto mudou desde então.
@@ -313,8 +372,8 @@ function paginate<T>(items: T[], page: number): { items: T[]; nextPage: number |
   return { items: rest.slice(0, 9), nextPage: start / 9 + 1 };
 }
 
-async function sendDays(turn: Turn, service: ServiceType, page: number): Promise<void> {
-  const slots = await findFreeSlots(turn.prisma, service, bookingWindow(turn.now), turn.tz);
+async function sendDays(turn: Turn, service: ServiceDefinition, page: number): Promise<void> {
+  const slots = await findFreeSlots(turn.prisma, service.code, bookingWindow(turn.now), turn.tz);
   const days = new Map<string, { date: LocalDate; count: number }>();
   for (const slot of slots) {
     const date = localDateOf(slot.startsAt, turn.tz);
@@ -323,23 +382,23 @@ async function sendDays(turn: Turn, service: ServiceType, page: number): Promise
     days.set(dateKey(date), entry);
   }
   if (days.size === 0) {
-    return turn.buttons('info', TEXTS.noSlots(service), [BUTTONS.reception, BUTTONS.menu]);
+    return turn.buttons('info', TEXTS.noSlots(service.label), [BUTTONS.reception, BUTTONS.menu]);
   }
 
   const { items, nextPage } = paginate([...days.values()], page);
   const rows = items.map((d, i) => ({
-    id: replyIds.day(service, dateKey(d.date)),
+    id: replyIds.day(service.code, dateKey(d.date)),
     title: `${i + 1}. ${formatDayShort(d.date)}`,
     description: TEXTS.freeSlots(d.count),
   }));
   if (nextPage !== undefined) {
     rows.push({
-      id: replyIds.days(service, nextPage),
+      id: replyIds.days(service.code, nextPage),
       title: `${rows.length + 1}. Mais datas`,
       description: 'Ver os dias seguintes',
     });
   }
-  return turn.list('choosing_day', TEXTS.chooseDay(service), 'Ver datas', [{ rows }]);
+  return turn.list('choosing_day', TEXTS.chooseDay(service.label), 'Ver datas', [{ rows }]);
 }
 
 function periodOf(date: Date, tz: string): 'Manhã' | 'Tarde' | 'Noite' {
@@ -347,7 +406,12 @@ function periodOf(date: Date, tz: string): 'Manhã' | 'Tarde' | 'Noite' {
   return hour < 12 ? 'Manhã' : hour < 18 ? 'Tarde' : 'Noite';
 }
 
-async function sendSlots(turn: Turn, service: ServiceType, key: string, page: number): Promise<void> {
+async function sendSlots(
+  turn: Turn,
+  service: ServiceDefinition,
+  key: string,
+  page: number,
+): Promise<void> {
   const day = parseDateKey(key);
   const window = bookingWindow(turn.now);
   let slots: Interval[] = [];
@@ -356,7 +420,7 @@ async function sendSlots(turn: Turn, service: ServiceType, key: string, page: nu
     const dayEnd = new Date(zonedToUtc(addDays(day, 1), 0, turn.tz).getTime() - 1);
     const from = dayStart > window.from ? dayStart : window.from;
     const to = dayEnd < window.to ? dayEnd : window.to;
-    if (from <= to) slots = await findFreeSlots(turn.prisma, service, { from, to }, turn.tz);
+    if (from <= to) slots = await findFreeSlots(turn.prisma, service.code, { from, to }, turn.tz);
   }
   if (!day || slots.length === 0) {
     await turn.text(TEXTS.dayFull);
@@ -373,28 +437,28 @@ async function sendSlots(turn: Turn, service: ServiceType, key: string, page: nu
       sections.push(section);
     }
     section.rows.push({
-      id: replyIds.slot(service, slot.startsAt),
+      id: replyIds.slot(service.code, slot.startsAt),
       title: `${i + 1}. ${formatTime(slot.startsAt, turn.tz)}`,
       description: `até ${formatTime(slot.endsAt, turn.tz)}`,
     });
   });
   if (nextPage !== undefined) {
     sections.at(-1)!.rows.push({
-      id: replyIds.day(service, key, nextPage),
+      id: replyIds.day(service.code, key, nextPage),
       title: `${items.length + 1}. Mais horários`,
       description: 'Ver os horários seguintes',
     });
   }
   return turn.list(
     'choosing_slot',
-    TEXTS.chooseSlot(service, formatDayShort(day)),
+    TEXTS.chooseSlot(service.label, formatDayShort(day)),
     'Ver horários',
     sections,
   );
 }
 
-async function chooseSlot(turn: Turn, service: ServiceType, startsAt: Date): Promise<void> {
-  const slot = await findSlotIfFree(turn.prisma, service, startsAt, turn.now, turn.tz);
+async function chooseSlot(turn: Turn, service: ServiceDefinition, startsAt: Date): Promise<void> {
+  const slot = await findSlotIfFree(turn.prisma, service.code, startsAt, turn.now, turn.tz);
   if (!slot) {
     await turn.text(TEXTS.slotGone);
     return sendDays(turn, service, 0);
@@ -404,11 +468,16 @@ async function chooseSlot(turn: Turn, service: ServiceType, startsAt: Date): Pro
   return sendConfirmation(turn, service, slot, name);
 }
 
-async function askName(turn: Turn, service: ServiceType, startsAt: Date, prompt: string): Promise<void> {
+async function askName(
+  turn: Turn,
+  service: ServiceDefinition,
+  startsAt: Date,
+  prompt: string,
+): Promise<void> {
   await turn.remember({
     step: 'awaiting_name',
     options: [],
-    serviceType: service,
+    serviceType: service.code,
     startsAt: startsAt.toISOString(),
   });
   return turn.text(prompt);
@@ -420,7 +489,9 @@ async function saveName(turn: Turn, name: string): Promise<void> {
     return sendMenu(turn, TEXTS.howCanIHelp);
   }
   turn.client = await setClientName(turn.prisma, turn.client.id, name);
-  return chooseSlot(turn, state.serviceType, new Date(state.startsAt));
+  const service = serviceByCode(turn.profile, state.serviceType);
+  if (!service) return sendMenu(turn, TEXTS.howCanIHelp);
+  return chooseSlot(turn, service, new Date(state.startsAt));
 }
 
 function retryName(turn: Turn): Promise<void> {
@@ -428,30 +499,41 @@ function retryName(turn: Turn): Promise<void> {
   if (state?.step !== 'awaiting_name' || !state.serviceType || !state.startsAt) {
     return sendMenu(turn, TEXTS.howCanIHelp);
   }
-  return askName(turn, state.serviceType, new Date(state.startsAt), TEXTS.invalidName);
+  const service = serviceByCode(turn.profile, state.serviceType);
+  if (!service) return sendMenu(turn, TEXTS.howCanIHelp);
+  return askName(turn, service, new Date(state.startsAt), TEXTS.invalidName);
 }
 
-function sendConfirmation(turn: Turn, service: ServiceType, slot: Interval, name: string): Promise<void> {
+function sendConfirmation(
+  turn: Turn,
+  service: ServiceDefinition,
+  slot: Interval,
+  name: string,
+): Promise<void> {
   const body = TEXTS.confirm({
-    service,
+    label: service.label,
     when: formatDateTime(slot.startsAt, turn.tz),
     minutes: Math.round((slot.endsAt.getTime() - slot.startsAt.getTime()) / 60_000),
     name,
   });
   return turn.buttons('confirming', body, [
-    { id: replyIds.confirm(service, slot.startsAt), title: 'Confirmar' },
-    { id: replyIds.days(service), title: 'Outro horário' },
+    { id: replyIds.confirm(service.code, slot.startsAt), title: 'Confirmar' },
+    { id: replyIds.days(service.code), title: 'Outro horário' },
     { id: replyIds.menu, title: 'Voltar ao menu' },
   ]);
 }
 
-async function confirmBooking(turn: Turn, service: ServiceType, startsAt: Date): Promise<void> {
+async function confirmBooking(
+  turn: Turn,
+  service: ServiceDefinition,
+  startsAt: Date,
+): Promise<void> {
   const client = turn.client!; // withConsent garante
   if (!decryptName(client)) return askName(turn, service, startsAt, TEXTS.askName);
   try {
     await bookAppointment(turn.prisma, {
       clientId: client.id,
-      serviceType: service,
+      serviceType: service.code,
       startsAt,
       now: turn.now,
       timeZone: turn.tz,
@@ -461,13 +543,18 @@ async function confirmBooking(turn: Turn, service: ServiceType, startsAt: Date):
     throw err;
   }
   await turn.forget();
-  return turn.buttons('info', TEXTS.booked({ service, when: formatDateTime(startsAt, turn.tz) }), [
+  const when = formatDateTime(startsAt, turn.tz);
+  return turn.buttons('info', TEXTS.booked({ label: service.label, when }), [
     BUTTONS.myAppointments,
     BUTTONS.menu,
   ]);
 }
 
-async function bookingFailed(turn: Turn, service: ServiceType, reason: BookingFailure): Promise<void> {
+async function bookingFailed(
+  turn: Turn,
+  service: ServiceDefinition,
+  reason: BookingFailure,
+): Promise<void> {
   switch (reason) {
     case 'slot_unavailable':
       await turn.text(TEXTS.slotTaken);
@@ -494,7 +581,7 @@ async function myAppointments(turn: Turn): Promise<void> {
   }
   const shown = list.slice(0, 3); // limite de 3 botões
   const body = TEXTS.appointmentsList(
-    shown.map((a) => ({ service: a.serviceType, when: formatDateTime(a.startsAt, turn.tz) })),
+    shown.map((a) => ({ label: turn.label(a.serviceType), when: formatDateTime(a.startsAt, turn.tz) })),
     list.length - shown.length,
   );
   return turn.buttons(
@@ -526,7 +613,7 @@ async function cancelAsk(turn: Turn, appointmentId: string): Promise<void> {
     return tooLate(turn);
   }
   const details = {
-    service: appointment.serviceType,
+    label: turn.label(appointment.serviceType),
     when: formatDateTime(appointment.startsAt, turn.tz),
   };
   return turn.buttons('confirming_cancel', TEXTS.confirmCancel(details), [
@@ -550,12 +637,12 @@ async function cancelYes(turn: Turn, appointmentId: string): Promise<void> {
     throw err;
   }
   await turn.forget();
-  const service = appointment.serviceType;
-  return turn.buttons(
-    'info',
-    TEXTS.cancelled({ service, when: formatDateTime(appointment.startsAt, turn.tz) }),
-    [{ id: replyIds.book(service), title: 'Marcar outro horário' }, BUTTONS.menu],
-  );
+  const code = appointment.serviceType;
+  const when = formatDateTime(appointment.startsAt, turn.tz);
+  return turn.buttons('info', TEXTS.cancelled({ label: turn.label(code), when }), [
+    { id: replyIds.book(code), title: 'Marcar outro horário' },
+    BUTTONS.menu,
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -579,7 +666,8 @@ async function reminderConfirm(turn: Turn, appointmentId: string): Promise<void>
     entityId: appointment.id,
   });
   const when = formatDateTime(appointment.startsAt, turn.tz);
-  return turn.buttons('info', TEXTS.attendanceConfirmed({ service: appointment.serviceType, when }), [
+  const label = turn.label(appointment.serviceType);
+  return turn.buttons('info', TEXTS.attendanceConfirmed({ label, when }), [
     BUTTONS.menu,
   ]);
 }
@@ -590,7 +678,7 @@ async function reminderChange(turn: Turn, appointmentId: string): Promise<void> 
   const late =
     appointment.startsAt.getTime() - turn.now.getTime() < BOOKING_RULES.cancelMinNoticeMs;
   const body = TEXTS.confirmReschedule({
-    service: appointment.serviceType,
+    label: turn.label(appointment.serviceType),
     when: formatDateTime(appointment.startsAt, turn.tz),
     late,
   });
@@ -615,8 +703,11 @@ async function reschedule(turn: Turn, appointmentId: string): Promise<void> {
     if (err instanceof BookingError) return notFound(turn);
     throw err;
   }
-  const service = appointment.serviceType;
-  await turn.text(TEXTS.rescheduled({ service, when: formatDateTime(appointment.startsAt, turn.tz) }));
+  const when = formatDateTime(appointment.startsAt, turn.tz);
+  await turn.text(TEXTS.rescheduled({ label: turn.label(appointment.serviceType), when }));
+  const service = serviceByCode(turn.profile, appointment.serviceType);
+  // Serviço que saiu do perfil: cancelado mesmo assim; a pessoa escolhe outro pelo menu.
+  if (!service) return sendMenu(turn, TEXTS.howCanIHelp);
   return withConsent(turn, service, () => sendDays(turn, service, 0));
 }
 

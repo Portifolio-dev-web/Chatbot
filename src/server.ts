@@ -62,6 +62,7 @@ function main(): void {
       whatsapp: getWhatsAppClient(),
       timeZone: config.clinic.timezone,
       privacyPolicyUrl: config.privacyPolicyUrl,
+      profile: config.profile,
     }),
   });
 
@@ -70,7 +71,12 @@ function main(): void {
       logger.fatal({ err: safeError(error) }, 'não foi possível abrir a porta');
       process.exit(1);
     }
-    logger.info({ port: config.port, env: config.env }, 'servidor no ar');
+    // "clinicProfile", e não "profile": o logger apaga qualquer campo "profile" (no payload do
+    // WhatsApp ele traz o nome da pessoa).
+    logger.info(
+      { port: config.port, env: config.env, clinicProfile: config.profileId },
+      'servidor no ar',
+    );
   });
 
   // Passo 4B: fila de lembretes/avisos à recepção e rotina de retenção.
@@ -82,6 +88,7 @@ function main(): void {
     whatsapp: getWhatsAppClient(),
     timeZone: config.clinic.timezone,
     receptionPhone: config.clinic.receptionWhatsapp,
+    profile: config.profile,
   });
 
   // Docker, Render e Railway mandam SIGTERM antes de parar o container: terminamos as

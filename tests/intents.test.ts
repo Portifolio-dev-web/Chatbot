@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { interpret, parseName, type Intent } from '../src/services/chatbot/intents.js';
 import { decodeReplyId, replyIds } from '../src/services/chatbot/reply-ids.js';
+import { PROFILES, type Profile } from '../src/profiles/index.js';
 import type { ConversationState } from '../src/services/conversation-state.js';
 
-const text = (t: string, state: ConversationState | null = null): Intent =>
-  interpret({ type: 'text', text: t }, state);
-const tap = (id: string): Intent => interpret({ type: 'reply', replyId: id, title: 'x' }, null);
+// O perfil com os dois serviços é o comportamento original (fisio + personal).
+const BOTH = PROFILES['fisio-personal'];
+
+const text = (t: string, state: ConversationState | null = null, profile: Profile = BOTH): Intent =>
+  interpret({ type: 'text', text: t }, state, profile);
+const tap = (id: string): Intent =>
+  interpret({ type: 'reply', replyId: id, title: 'x' }, null, BOTH);
 
 describe('ids de botão', () => {
   it('ida e volta de cada tipo de id', () => {
@@ -126,9 +131,40 @@ describe('texto livre', () => {
   });
 
   it('áudio, imagem etc.', () => {
-    expect(interpret({ type: 'unsupported', originalType: 'audio' }, null)).toEqual({
+    expect(interpret({ type: 'unsupported', originalType: 'audio' }, null, BOTH)).toEqual({
       kind: 'unsupported',
     });
+  });
+});
+
+describe('perfis', () => {
+  const PHYSIO_ONLY = PROFILES.fisioterapia;
+  const PERSONAL_ONLY = PROFILES.personal;
+
+  it('a triagem só reconhece serviços do perfil', () => {
+    expect(text('quero hipertrofia', null, PERSONAL_ONLY)).toEqual({
+      kind: 'suggest',
+      service: 'PERSONAL_TRAINING',
+    });
+    // Num perfil só de fisioterapia, "hipertrofia" não aponta para nada.
+    expect(text('quero hipertrofia', null, PHYSIO_ONLY)).toEqual({ kind: 'unknown' });
+    expect(text('estou com dor no ombro', null, PHYSIO_ONLY)).toEqual({
+      kind: 'suggest',
+      service: 'PHYSIOTHERAPY',
+    });
+  });
+
+  it('o número digitado segue o menu do perfil', () => {
+    // Com 2 serviços, "3" = valores; com 1 serviço, os itens sobem uma posição.
+    expect(text('3', null, BOTH)).toEqual({ kind: 'faq', topic: 'prices' });
+    expect(text('1', null, PHYSIO_ONLY)).toEqual({ kind: 'book', service: 'PHYSIOTHERAPY' });
+    expect(text('2', null, PHYSIO_ONLY)).toEqual({ kind: 'faq', topic: 'prices' });
+    expect(text('8', null, PHYSIO_ONLY)).toEqual({ kind: 'unknown' }); // menu tem 7 itens
+  });
+
+  it('o id do botão leva o código; o formato é conferido, a existência no perfil não', () => {
+    expect(tap('book:PSYCHOTHERAPY')).toEqual({ kind: 'book', service: 'PSYCHOTHERAPY' });
+    expect(tap('book:fisio')).toEqual({ kind: 'unknown' }); // formato antigo/minúsculo
   });
 });
 

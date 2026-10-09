@@ -5,7 +5,6 @@ import type {
   Appointment,
   Prisma,
   PrismaClient,
-  ServiceType,
 } from '../generated/prisma/client.js';
 import { audit, type Db } from './audit.js';
 import { findSlotIfFree } from './availability.js';
@@ -60,7 +59,7 @@ export function reminderTime(startsAt: Date, timeZone: string): Date {
  */
 export async function bookAppointment(
   prisma: PrismaClient,
-  input: { clientId: string; serviceType: ServiceType; startsAt: Date; now: Date; timeZone: string },
+  input: { clientId: string; serviceType: string; startsAt: Date; now: Date; timeZone: string },
 ): Promise<Appointment> {
   const { clientId, serviceType, startsAt, now, timeZone } = input;
   try {

@@ -10,6 +10,7 @@ const base = {
   WHATSAPP_PHONE_NUMBER_ID: '123456789012345',
   ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64'),
   BLIND_INDEX_KEY: Buffer.alloc(32, 2).toString('base64'),
+  CLINIC_PROFILE: 'fisio-personal',
 };
 
 function configError(source: NodeJS.ProcessEnv): string {
@@ -124,6 +125,19 @@ describe('loadConfig', () => {
     const cfg = loadConfig({ ...dev, ENCRYPTION_KEYS_PREVIOUS: antigas.join(', ') });
     expect(cfg.crypto.previousEncryptionKeys).toHaveLength(2);
     expect(cfg.crypto.encryptionKey).toHaveLength(32);
+  });
+
+  it('perfil obrigatório em todos os ambientes, e só os do catálogo', () => {
+    const dev = { ...base, NODE_ENV: 'development' };
+    const { CLINIC_PROFILE: _omit, ...withoutProfile } = dev;
+    expect(configError(withoutProfile)).toMatch(/CLINIC_PROFILE: obrigatório; use um destes perfis: .*fisioterapia/);
+    const msg = configError({ ...dev, CLINIC_PROFILE: 'perfil-inventado' });
+    expect(msg).toContain('CLINIC_PROFILE');
+    expect(msg).not.toContain('perfil-inventado');
+
+    const cfg = loadConfig({ ...dev, CLINIC_PROFILE: 'personal' });
+    expect(cfg.profileId).toBe('personal');
+    expect(cfg.profile.services.map((s) => s.code)).toEqual(['PERSONAL_TRAINING']);
   });
 
   it('a mensagem de erro nunca ecoa o valor recebido', () => {

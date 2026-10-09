@@ -10,6 +10,7 @@ import {
   createInboundDispatcher,
   createPrismaDispatcherStore,
 } from '../src/services/inbound-dispatcher.js';
+import { PROFILES } from '../src/profiles/index.js';
 import { createChatbot } from '../src/services/chatbot/chatbot.js';
 import { findClientByPhone } from '../src/services/clients.js';
 import { recordingWhatsApp, textMessage, webhookPayload } from './fixtures.js';
@@ -206,6 +207,7 @@ describe.skipIf(!url)('banco de dados (integração)', () => {
           whatsapp,
           timeZone: 'America/Sao_Paulo',
           privacyPolicyUrl: 'https://exemplo.com/privacidade',
+          profile: PROFILES['fisio-personal'],
         }),
       }),
     });

@@ -1,5 +1,5 @@
 import { OUTBOX } from '../config/business-rules.js';
-import { SERVICES } from '../content/clinic.js';
+import { serviceLabel, type Profile } from '../profiles/index.js';
 import { TEMPLATE_LANGUAGE, TEMPLATES } from '../content/templates.js';
 import { Prisma, type OutboundKind, type PrismaClient } from '../generated/prisma/client.js';
 import { getLogger, safeError } from '../lib/logger.js';
@@ -30,6 +30,8 @@ export interface OutboxDeps {
   timeZone: string;
   /** Sem ele (fora de produção), os avisos à recepção ficam esperando na fila. */
   receptionPhone: string | undefined;
+  /** Perfil da instalação: dá o nome do serviço mostrado no lembrete e no aviso. */
+  profile: Profile;
 }
 
 interface Claimed {
@@ -89,7 +91,7 @@ async function compose(
     include: { client: true },
   });
   if (!appointment) return null;
-  const service = SERVICES[appointment.serviceType].label;
+  const service = serviceLabel(deps.profile, appointment.serviceType);
   const when = formatDateTime(appointment.startsAt, deps.timeZone);
   const name = decryptName(appointment.client);
 

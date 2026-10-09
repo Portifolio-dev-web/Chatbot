@@ -39,6 +39,7 @@ Sem Node instalado, troque `node` por `docker run --rm node:24-alpine node`.
 | `WHATSAPP_APP_SECRET` | App → **Configurações do app → Básico → Chave secreta do aplicativo**. |
 | `WHATSAPP_VERIFY_TOKEN` | Você inventa (valor gerado acima) e cola no painel no passo 4. |
 | `RECEPTION_WHATSAPP` | WhatsApp da recepção (DDI + DDD + número), **diferente** do número do bot. Opcional para testar. |
+| `CLINIC_PROFILE` | Tipo de negócio: `fisio-personal`, `fisioterapia` ou `personal` (veja [Perfis](#perfis)). |
 
 > ⚠️ Guarde `ENCRYPTION_KEY` e `BLIND_INDEX_KEY` num cofre de senhas, fora do backup do banco.
 > Perder a chave = perder nome e telefone de todos os clientes.
@@ -56,7 +57,7 @@ docker compose logs -f app                              # acompanhar
 
 Confira em <http://localhost:3000/health> → `{"status":"ok"}`.
 
-A grade de exemplo fica em `src/content/default-schedule.ts`:
+A grade de exemplo é a do perfil (`src/profiles/index.ts`):
 - fisioterapia: segunda a sexta, 8h–12h e 14h–18h;
 - personal trainer: segunda a sexta, 6h–10h e 17h–21h; sábado, 8h–12h.
 
@@ -135,6 +136,26 @@ abrir o bot para clientes.
 - [ ] `NODE_ENV=production` e `RECEPTION_WHATSAPP` preenchido.
 - [ ] HTTPS de verdade no lugar do ngrok.
 - [ ] Backup do banco **e**, em outro lugar, das chaves.
+
+## Perfis
+
+Cada instalação atende um tipo de negócio, escolhido em `CLINIC_PROFILE`:
+
+| Perfil | Serviços |
+|---|---|
+| `fisio-personal` | Fisioterapia e personal trainer |
+| `fisioterapia` | Só fisioterapia |
+| `personal` | Só personal trainer |
+
+O perfil define os serviços, o menu, as palavras da triagem ("dor no joelho" → fisioterapia) e
+a grade de exemplo do seed. Os dados do negócio (nome, endereço, preços) continuam em
+`src/content/clinic.ts`.
+
+- **Novo perfil:** acrescente em `src/profiles/index.ts`. O `npm test` confere os limites do
+  WhatsApp e as palavras-chave de todos os perfis.
+- **Nunca mude o código** (`code`) de um serviço que já tem agendamentos.
+- **Trocar o perfil de uma instalação** não apaga nada: agendamentos de um serviço que saiu do
+  perfil continuam visíveis e canceláveis.
 
 ## Desenvolvimento e testes
 

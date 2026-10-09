@@ -1,8 +1,8 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { defaultScheduleRows } from '../src/content/default-schedule.js';
 import { currentConsentText } from '../src/content/consent.js';
-import type { PrismaClient, ServiceType } from '../src/generated/prisma/client.js';
+import type { PrismaClient } from '../src/generated/prisma/client.js';
+import { PROFILES, type Profile } from '../src/profiles/index.js';
 import { phoneIndex } from '../src/lib/crypto.js';
 import { setLoggerForTesting } from '../src/lib/logger.js';
 import { createPrismaClient } from '../src/lib/prisma.js';
@@ -12,7 +12,7 @@ import { createChatbot } from '../src/services/chatbot/chatbot.js';
 import { replyIds } from '../src/services/chatbot/reply-ids.js';
 import { findClientByPhone, recordConsent, setClientName } from '../src/services/clients.js';
 import type { MessageContent } from '../src/services/webhook-parser.js';
-import { captureLogs, recordingWhatsApp, type SentMessage } from './fixtures.js';
+import { captureLogs, ensureDefaultSchedule, recordingWhatsApp, type SentMessage } from './fixtures.js';
 
 /*
  * O funil inteiro contra um PostgreSQL de verdade (TEST_DATABASE_URL, banco DESCARTÁVEL).
@@ -47,9 +47,7 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
     prisma = createPrismaClient(url!);
     now = randomMonday8am();
     setLoggerForTesting(logs.logger);
-    if ((await prisma.availabilityRule.count()) === 0) {
-      await prisma.availabilityRule.createMany({ data: defaultScheduleRows() });
-    }
+    await ensureDefaultSchedule(prisma);
   });
   afterAll(async () => {
     setLoggerForTesting(undefined);
@@ -57,9 +55,9 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
   });
 
   /** Uma pessoa conversando com o bot. Devolve as mensagens que o bot mandou a cada ação. */
-  function person(phone = randomPhone()) {
+  function person(phone = randomPhone(), profile: Profile = PROFILES['fisio-personal']) {
     const { whatsapp, sent } = recordingWhatsApp();
-    const bot = createChatbot({ prisma, whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, now: () => now });
+    const bot = createChatbot({ prisma, whatsapp, timeZone: SP, privacyPolicyUrl: POLICY, profile, now: () => now });
     let seen = 0;
     let lastMessageId = '';
     async function send(content: MessageContent): Promise<SentMessage[]> {
@@ -93,7 +91,7 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
     return { ...p, clientId: client.id };
   }
 
-  async function freeSlots(service: ServiceType = 'PHYSIOTHERAPY') {
+  async function freeSlots(service: string = 'PHYSIOTHERAPY') {
     return findFreeSlots(prisma, service, bookingWindow(now), SP);
   }
 
@@ -292,5 +290,42 @@ describe.skipIf(!url)('atendimento completo (integração)', () => {
     expect(bodyOf((await ivo.tap(replyIds.deleteYes))[0])).toMatch(/Não temos nenhum dado/);
     expect(bodyOf((await ivo.say('quanto custa?'))[0])).toMatch(/Valores/);
     expect(await findClientByPhone(prisma, ivo.phone)).toBeNull();
+  });
+
+  it('perfil só de fisioterapia: menu, triagem e agendamento ficam só no serviço do perfil', async () => {
+    const julia = person(randomPhone(), PROFILES.fisioterapia);
+
+    const [menu] = await julia.say('oi');
+    expect(rowsOf(menu).map((r) => r.title).slice(0, 2)).toEqual(['1. Fisioterapia', '2. Valores e pacotes']);
+    expect(bodyOf(menu)).toContain('agendar *fisioterapia* e a tirar dúvidas');
+
+    // Um serviço só: "quero agendar" vai direto ao aviso de consentimento, sem perguntar qual.
+    const [consent] = await julia.say('quero agendar');
+    expect(buttonsOf(consent)[0]!.id).toMatch(/^consent:PHYSIOTHERAPY:/);
+
+    // Botão de serviço que NÃO existe neste perfil (forjado ou de outra instalação): menu.
+    const [forged] = await julia.tap(replyIds.book('PERSONAL_TRAINING'));
+    expect(bodyOf(forged)).toMatch(/não entendi/);
+    const slot = (await freeSlots('PERSONAL_TRAINING'))[0]!;
+    const [forgedConfirm] = await julia.tap(replyIds.confirm('PERSONAL_TRAINING', slot.startsAt));
+    expect(bodyOf(forgedConfirm)).toMatch(/não entendi/);
+    expect(await findClientByPhone(prisma, julia.phone)).toBeNull(); // nada gravado
+  });
+
+  it('agendamento de serviço que saiu do perfil continua visível e cancelável', async () => {
+    // Cliente marcou personal quando a instalação era fisio-personal...
+    const kaio = await readyClient('Kaio');
+    const slot = (await freeSlots('PERSONAL_TRAINING')).filter((s) => s.startsAt.getTime() - now.getTime() > 48 * 3600_000)[2]!;
+    await kaio.tap(replyIds.confirm('PERSONAL_TRAINING', slot.startsAt));
+    const appt = await prisma.appointment.findFirstOrThrow({ where: { clientId: kaio.clientId } });
+
+    // ...e a instalação passou para o perfil só de fisioterapia.
+    const sameClientNewProfile = person(kaio.phone, PROFILES.fisioterapia);
+    const [list] = await sameClientNewProfile.say('meus agendamentos');
+    expect(bodyOf(list)).toContain('PERSONAL_TRAINING'); // sem nome no perfil: mostra o código
+    const [ask] = await sameClientNewProfile.tap(replyIds.cancelAsk(appt.id));
+    const [done] = await sameClientNewProfile.tap(buttonsOf(ask)[0]!.id);
+    expect(bodyOf(done)).toMatch(/cancelamos/);
+    expect((await prisma.appointment.findUniqueOrThrow({ where: { id: appt.id } })).status).toBe('CANCELLED');
   });
 });

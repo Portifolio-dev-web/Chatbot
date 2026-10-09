@@ -1,9 +1,9 @@
-import type { ServiceType } from '../../generated/prisma/client.js';
 import { parseDateKey } from '../../lib/time.js';
+import { SERVICE_CODE } from '../../profiles/types.js';
 import type { FaqTopic, Intent } from './intents.js';
 
 /*
- * IDs dos botões e itens de lista. Cada id carrega a ação inteira ("slot:fisio:<horário>"),
+ * IDs dos botões e itens de lista. Cada id carrega a ação inteira ("slot:PHYSIOTHERAPY:<horário>"),
  * então tocar num botão funciona mesmo sem estado salvo, ou numa mensagem antiga.
  *
  * SEGURANÇA: o id volta pelo webhook como ENTRADA DO USUÁRIO. Tudo é validado aqui (formato) e
@@ -11,13 +11,13 @@ import type { FaqTopic, Intent } from './intents.js';
  * só consegue o mesmo que um toque legítimo.
  */
 
-const SERVICE_CODES: Record<ServiceType, string> = {
-  PHYSIOTHERAPY: 'fisio',
-  PERSONAL_TRAINING: 'personal',
-};
-
-function parseService(code: string | undefined): ServiceType | undefined {
-  return (Object.keys(SERVICE_CODES) as ServiceType[]).find((s) => SERVICE_CODES[s] === code);
+/**
+ * O serviço vai no id pelo CÓDIGO (ex.: PHYSIOTHERAPY). Aqui só se confere o formato; se o
+ * serviço existe no perfil desta instalação é o atendimento que confere (um botão antigo ou
+ * forjado com serviço de outro perfil cai no menu).
+ */
+function parseService(code: string | undefined): string | undefined {
+  return code && SERVICE_CODE.test(code) ? code : undefined;
 }
 
 /** Horário em minutos desde 1970, base 36: curto e sem caracteres especiais. */
@@ -42,17 +42,17 @@ const FAQ_TOPICS: readonly FaqTopic[] = ['prices', 'location', 'hours'];
 export const replyIds = {
   menu: 'menu',
   askService: 'book',
-  book: (s: ServiceType) => `book:${SERVICE_CODES[s]}`,
+  book: (s: string) => `book:${s}`,
   faq: (topic: FaqTopic) => `faq:${topic}`,
   reception: 'reception',
   myAppointments: 'mine',
   privacy: 'privacy',
-  consentYes: (s: ServiceType, version: string) => `consent:${SERVICE_CODES[s]}:${version}`,
+  consentYes: (s: string, version: string) => `consent:${s}:${version}`,
   consentNo: 'consent:no',
-  days: (s: ServiceType, page = 0) => `days:${SERVICE_CODES[s]}:${page}`,
-  day: (s: ServiceType, key: string, page = 0) => `day:${SERVICE_CODES[s]}:${key}:${page}`,
-  slot: (s: ServiceType, startsAt: Date) => `slot:${SERVICE_CODES[s]}:${encodeTime(startsAt)}`,
-  confirm: (s: ServiceType, startsAt: Date) => `confirm:${SERVICE_CODES[s]}:${encodeTime(startsAt)}`,
+  days: (s: string, page = 0) => `days:${s}:${page}`,
+  day: (s: string, key: string, page = 0) => `day:${s}:${key}:${page}`,
+  slot: (s: string, startsAt: Date) => `slot:${s}:${encodeTime(startsAt)}`,
+  confirm: (s: string, startsAt: Date) => `confirm:${s}:${encodeTime(startsAt)}`,
   cancelAsk: (appointmentId: string) => `cancel:${appointmentId}`,
   cancelYes: (appointmentId: string) => `cancelyes:${appointmentId}`,
   deleteAsk: 'delete',

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { BOOKING_RULES } from '../config/business-rules.js';
 import type { Prisma } from '../generated/prisma/client.js';
+import { SERVICE_CODE } from '../profiles/types.js';
 import type { Db } from './audit.js';
 
 /*
@@ -36,8 +37,11 @@ export type Option = z.infer<typeof optionSchema>;
 
 const contextSchema = z.object({
   options: z.array(optionSchema).max(10).default([]),
-  /** Só na etapa awaiting_name: o horário escolhido, à espera do nome para confirmar. */
-  serviceType: z.enum(['PHYSIOTHERAPY', 'PERSONAL_TRAINING']).optional(),
+  /**
+   * Só na etapa awaiting_name: o serviço (código) e o horário escolhidos, à espera do nome
+   * para confirmar. O atendimento confere se o serviço existe no perfil desta instalação.
+   */
+  serviceType: z.string().regex(SERVICE_CODE).optional(),
   startsAt: z.iso.datetime().optional(),
 });
 

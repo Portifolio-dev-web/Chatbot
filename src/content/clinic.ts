@@ -1,5 +1,3 @@
-import type { ServiceType } from '../generated/prisma/client.js';
-
 /*
  * CONTEÚDO DA CLÍNICA: tudo o que o bot informa sobre a clínica fica aqui.
  * Troque cada "PREENCHER" pelo texto real. Em produção o servidor se recusa a subir enquanto
@@ -30,26 +28,8 @@ export const CLINIC = {
     '*Personal trainer*\n• Aula avulsa: R$ 0\n• Plano mensal (2x/semana): R$ 0',
 } as const;
 
-/** Como cada serviço aparece para o cliente (triagem do menu). */
-export const SERVICES: Record<
-  ServiceType,
-  { label: string; menuDescription: string; suggestion: string }
-> = {
-  PHYSIOTHERAPY: {
-    label: 'Fisioterapia',
-    menuDescription: 'Reabilitação, dores, pós-operatório',
-    suggestion:
-      'Para dores, lesões e reabilitação, o indicado é a *Fisioterapia*. ' +
-      'Quer agendar uma avaliação?',
-  },
-  PERSONAL_TRAINING: {
-    label: 'Personal trainer',
-    menuDescription: 'Condicionamento, hipertrofia',
-    suggestion:
-      'Para condicionamento físico, hipertrofia e emagrecimento, o indicado é o ' +
-      '*Personal trainer*. Quer agendar um treino?',
-  },
-};
+// Os SERVIÇOS (nome, descrição, triagem) não ficam aqui: vêm do perfil da instalação
+// (CLINIC_PROFILE, src/profiles). Este arquivo guarda só os dados do negócio.
 
 /** Campos ainda com "PREENCHER" (vazio = conteúdo pronto). */
 export function unfilledContentFields(): string[] {

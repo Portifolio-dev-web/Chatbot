@@ -21,13 +21,6 @@ datasource db {
   provider = "postgresql"
 }
 
-enum ServiceType {
-  PHYSIOTHERAPY
-  PERSONAL_TRAINING
-
-  @@map("service_type")
-}
-
 enum AppointmentStatus {
   CONFIRMED
   CANCELLED
@@ -97,7 +90,9 @@ model Appointment {
   clientId    String            @map("client_id") @db.Uuid
   /// Restrict: o histórico de agendamentos sobrevive à anonimização do cliente.
   client      Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
-  serviceType ServiceType       @map("service_type")
+  /// Código do serviço, definido pelo perfil (src/profiles). Texto, e não enum do banco: cada
+  /// perfil tem seus serviços, e um perfil novo não exige migração.
+  serviceType String            @map("service_type") @db.VarChar(40)
   startsAt    DateTime          @map("starts_at") @db.Timestamptz(3)
   endsAt      DateTime          @map("ends_at") @db.Timestamptz(3)
   status      AppointmentStatus @default(CONFIRMED)
@@ -120,16 +115,16 @@ model Appointment {
 /// Grade semanal de atendimento. Horários livres = grade - bloqueios - agendamentos.
 /// Horas em minutos desde 00:00 no fuso da clínica: 480 = 08:00, 1080 = 18:00.
 model AvailabilityRule {
-  id          Int         @id @default(autoincrement())
-  serviceType ServiceType @map("service_type")
+  id          Int     @id @default(autoincrement())
+  serviceType String  @map("service_type") @db.VarChar(40)
   /// 0 = domingo ... 6 = sábado.
-  weekday     Int         @db.SmallInt
-  startMinute Int         @map("start_minute") @db.SmallInt
-  endMinute   Int         @map("end_minute") @db.SmallInt
+  weekday     Int     @db.SmallInt
+  startMinute Int     @map("start_minute") @db.SmallInt
+  endMinute   Int     @map("end_minute") @db.SmallInt
   /// Duração de cada atendimento. Os horários oferecidos começam em startMinute, em passos
   /// deste tamanho, sem passar de endMinute.
-  slotMinutes Int         @map("slot_minutes") @db.SmallInt
-  active      Boolean     @default(true)
+  slotMinutes Int     @map("slot_minutes") @db.SmallInt
+  active      Boolean @default(true)
 
   @@index([serviceType, weekday])
   @@map("availability_rules")
@@ -137,12 +132,12 @@ model AvailabilityRule {
 
 /// Período sem atendimento: feriado, férias, evento. serviceType nulo = vale para todos.
 model ScheduleBlock {
-  id          Int          @id @default(autoincrement())
-  serviceType ServiceType? @map("service_type")
-  startsAt    DateTime     @map("starts_at") @db.Timestamptz(3)
-  endsAt      DateTime     @map("ends_at") @db.Timestamptz(3)
+  id          Int      @id @default(autoincrement())
+  serviceType String?  @map("service_type") @db.VarChar(40)
+  startsAt    DateTime @map("starts_at") @db.Timestamptz(3)
+  endsAt      DateTime @map("ends_at") @db.Timestamptz(3)
   /// Motivo interno ("Feriado"). Nunca dado de cliente.
-  reason      String?      @db.VarChar(120)
+  reason      String?  @db.VarChar(120)
 
   @@index([startsAt, endsAt])
   @@map("schedule_blocks")

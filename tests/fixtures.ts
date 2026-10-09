@@ -1,7 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { AxiosError, type AxiosAdapter } from 'axios';
 import type { DestinationStream } from 'pino';
+import { scheduleRows } from '../src/content/default-schedule.js';
+import type { PrismaClient } from '../src/generated/prisma/client.js';
 import { createLogger } from '../src/lib/logger.js';
+import { PROFILES } from '../src/profiles/index.js';
 import { createWhatsAppClient, type WhatsAppClient } from '../src/services/whatsapp-client.js';
 
 /** Corpo de uma mensagem enviada à Graph API (como a Meta recebe). */
@@ -96,6 +99,19 @@ export function textMessage(overrides: Record<string, unknown> = {}): Record<str
     text: { body: TEXT },
     ...overrides,
   };
+}
+
+/**
+ * Garante a grade de exemplo do perfil fisio-personal no banco de teste, criando só as
+ * regras que faltam. Antes, os testes só criavam a grade se a tabela estivesse VAZIA: uma
+ * regra solta deixada por outro teste (ou à mão) bastava para faltar horário.
+ */
+export async function ensureDefaultSchedule(prisma: PrismaClient): Promise<void> {
+  for (const row of scheduleRows(PROFILES['fisio-personal'].defaultSchedule)) {
+    if (!(await prisma.availabilityRule.findFirst({ where: { ...row, active: true } }))) {
+      await prisma.availabilityRule.create({ data: row });
+    }
+  }
 }
 
 /** Logger real (com o mesmo redact de produção) escrevendo numa lista, para inspeção. */

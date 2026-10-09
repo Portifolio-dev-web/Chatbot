@@ -1,39 +1,44 @@
-import type { ServiceType } from '../../generated/prisma/client.js';
+import { normalize } from '../../lib/text.js';
+import type { Profile } from '../../profiles/index.js';
 import type { ConversationState, Option } from '../conversation-state.js';
 import type { MessageContent } from '../webhook-parser.js';
 import { decodeReplyId } from './reply-ids.js';
-import { MENU_OPTIONS } from './texts.js';
+import { menuOptions } from './texts.js';
 
 /*
  * Traduz a mensagem recebida numa intenção. Ordem de prioridade:
  * 1. toque em botão/lista: o id diz exatamente o que fazer;
  * 2. esperando o nome: o texto é o nome;
  * 3. texto que corresponde a uma opção da última pergunta ("2", "8h", "qui 09/10");
- * 4. número solto: item do menu;
+ * 4. número solto: item do menu (o menu depende do perfil);
  * 5. palavras-chave ("valores", "endereço", "dor no joelho" -> triagem para fisioterapia).
+ *    As palavras que apontam para cada serviço vêm do PERFIL (src/profiles).
  *
  * PRIVACIDADE: o texto livre é lido aqui e descartado. Nada do que a pessoa escreve (por
  * exemplo, a queixa de saúde) é gravado nem vai para o log; só a intenção resultante.
  */
 
+export { normalize };
+
 export type FaqTopic = 'prices' | 'location' | 'hours';
 
+/** `service` é o CÓDIGO do serviço; o atendimento confere se ele existe no perfil. */
 export type Intent =
   | { kind: 'menu'; greeting: boolean }
   | { kind: 'ask_service' }
-  | { kind: 'suggest'; service: ServiceType }
-  | { kind: 'book'; service: ServiceType }
+  | { kind: 'suggest'; service: string }
+  | { kind: 'book'; service: string }
   | { kind: 'faq'; topic: FaqTopic }
   | { kind: 'reception' }
   | { kind: 'my_appointments' }
   | { kind: 'privacy' }
-  | { kind: 'consent'; service: ServiceType; version: string }
+  | { kind: 'consent'; service: string; version: string }
   | { kind: 'consent_declined' }
   | { kind: 'consent_typed' }
-  | { kind: 'days'; service: ServiceType; page: number }
-  | { kind: 'day'; service: ServiceType; day: string; page: number }
-  | { kind: 'slot'; service: ServiceType; startsAt: Date }
-  | { kind: 'confirm'; service: ServiceType; startsAt: Date }
+  | { kind: 'days'; service: string; page: number }
+  | { kind: 'day'; service: string; day: string; page: number }
+  | { kind: 'slot'; service: string; startsAt: Date }
+  | { kind: 'confirm'; service: string; startsAt: Date }
   | { kind: 'cancel_ask'; appointmentId: string }
   | { kind: 'cancel_yes'; appointmentId: string }
   | { kind: 'delete_ask' }
@@ -46,16 +51,6 @@ export type Intent =
   | { kind: 'thanks' }
   | { kind: 'unsupported' }
   | { kind: 'unknown' };
-
-/** minúsculas, sem acento, só letras/números/":" separados por um espaço. */
-export function normalize(text: string): string {
-  return text
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9:]+/g, ' ')
-    .trim();
-}
 
 /** "8h", "8:00", "08h00", "8 h" -> "08:00". */
 function typedTime(normalized: string): string | undefined {
@@ -105,25 +100,18 @@ const PRIVACY = words('privacidade lgpd apagar excluir deletar parar');
 const CONSENT = words('concordo aceito');
 const BOOKING = words('agendar marcar agendamento agenda consulta sessao vaga vagas avaliacao');
 const SLOT_HINTS = words('disponivel disponiveis livre livres vaga vagas amanha hoje tem');
-const PHYSIO = words(
-  'fisio fisioterapia fisioterapeuta dor dores reabilitacao lesao lesoes coluna joelho ombro ' +
-    'tendinite postura cirurgia operatorio',
-);
-const PERSONAL = words(
-  'personal treino treinar treinador academia hipertrofia emagrecer emagrecimento ' +
-    'condicionamento musculacao',
-);
 const PRICES = words('valor valores preco precos quanto custa custo pacote pacotes plano planos mensalidade');
 const LOCATION = words('endereco onde localizacao local fica chegar mapa estacionamento');
 const HOURS = words('horario horarios funcionamento abre abrem fecha fecham aberto atendem expediente');
 const RECEPTION = words('recepcao atendente humano pessoa falar ligar telefone secretaria');
 
-function hasAny(tokens: Set<string>, list: Set<string>): boolean {
-  for (const token of tokens) if (list.has(token)) return true;
+function hasAny(tokens: Set<string>, list: ReadonlySet<string> | readonly string[]): boolean {
+  const set = list instanceof Set ? list : new Set(list);
+  for (const token of tokens) if (set.has(token)) return true;
   return false;
 }
 
-function interpretText(text: string, state: ConversationState | null): Intent {
+function interpretText(text: string, state: ConversationState | null, profile: Profile): Intent {
   const t = normalize(text);
   const tokens = new Set(t.split(' ').filter(Boolean));
 
@@ -140,7 +128,7 @@ function interpretText(text: string, state: ConversationState | null): Intent {
   }
 
   if (/^\d{1,2}$/.test(t)) {
-    const item = MENU_OPTIONS[Number(t) - 1];
+    const item = menuOptions(profile)[Number(t) - 1];
     return (item && decodeReplyId(item.id)) || { kind: 'unknown' };
   }
   if (!t) return { kind: 'unknown' };
@@ -149,18 +137,17 @@ function interpretText(text: string, state: ConversationState | null): Intent {
   if (hasAny(tokens, MINE)) return { kind: 'my_appointments' };
   if (hasAny(tokens, CONSENT)) return { kind: 'consent_typed' };
 
-  const physio = hasAny(tokens, PHYSIO);
-  const personal = hasAny(tokens, PERSONAL);
+  // Triagem pelas palavras-chave dos serviços DESTE perfil. Só decide quando exatamente um
+  // serviço bate; com dois (ou nenhum), pergunta.
+  const matched = profile.services.filter((service) => hasAny(tokens, service.keywords));
+  const only = matched.length === 1 ? matched[0] : undefined;
   const wantsSlot =
     hasAny(tokens, BOOKING) || (hasAny(tokens, HOURS) && hasAny(tokens, SLOT_HINTS));
   if (wantsSlot) {
-    if (physio && !personal) return { kind: 'book', service: 'PHYSIOTHERAPY' };
-    if (personal && !physio) return { kind: 'book', service: 'PERSONAL_TRAINING' };
-    return { kind: 'ask_service' };
+    return only ? { kind: 'book', service: only.code } : { kind: 'ask_service' };
   }
-  // Triagem: a pessoa descreveu o que procura, sem pedir horário.
-  if (physio && !personal) return { kind: 'suggest', service: 'PHYSIOTHERAPY' };
-  if (personal && !physio) return { kind: 'suggest', service: 'PERSONAL_TRAINING' };
+  // A pessoa descreveu o que procura, sem pedir horário: sugere o serviço.
+  if (only) return { kind: 'suggest', service: only.code };
 
   if (hasAny(tokens, PRICES)) return { kind: 'faq', topic: 'prices' };
   if (hasAny(tokens, LOCATION)) return { kind: 'faq', topic: 'location' };
@@ -173,13 +160,17 @@ function interpretText(text: string, state: ConversationState | null): Intent {
   return { kind: 'unknown' };
 }
 
-export function interpret(content: MessageContent, state: ConversationState | null): Intent {
+export function interpret(
+  content: MessageContent,
+  state: ConversationState | null,
+  profile: Profile,
+): Intent {
   switch (content.type) {
     case 'reply':
       return decodeReplyId(content.replyId) ?? { kind: 'unknown' };
     case 'unsupported':
       return { kind: 'unsupported' };
     case 'text':
-      return interpretText(content.text, state);
+      return interpretText(content.text, state, profile);
   }
 }
